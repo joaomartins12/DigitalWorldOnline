@@ -1,9 +1,13 @@
-﻿using DigitalWorldOnline.Application.Separar.Commands.Update;
+﻿using System;
+using System.Linq;
+using System.Threading.Tasks;
+using DigitalWorldOnline.Application.Separar.Commands.Update;
 using DigitalWorldOnline.Application.Separar.Queries;
 using DigitalWorldOnline.Commons.Entities;
 using DigitalWorldOnline.Commons.Enums.Character;
 using DigitalWorldOnline.Commons.Enums.PacketProcessor;
 using DigitalWorldOnline.Commons.Interfaces;
+using DigitalWorldOnline.Commons.Models.Mechanics;
 using DigitalWorldOnline.Commons.Packets.Chat;
 using DigitalWorldOnline.Commons.Packets.GameServer;
 using DigitalWorldOnline.Commons.Packets.MapServer;
@@ -31,7 +35,13 @@ namespace DigitalWorldOnline.Game.PacketProcessors
         private readonly ISender _sender;
         private readonly IConfiguration _configuration;
 
-        public PartyMemberKickPacketProcessor(PartyManager partyManager, MapServer mapServer, ILogger logger, ISender sender, IConfiguration configuration, DungeonsServer dungeonServer)
+        public PartyMemberKickPacketProcessor(
+            PartyManager partyManager,
+            MapServer mapServer,
+            ILogger logger,
+            ISender sender,
+            IConfiguration configuration,
+            DungeonsServer dungeonServer)
         {
             _partyManager = partyManager;
             _mapServer = mapServer;
@@ -43,140 +53,175 @@ namespace DigitalWorldOnline.Game.PacketProcessors
 
         public async Task Process(GameClient client, byte[] packetData)
         {
-            var packet = new GamePacketReader(packetData);
-
-            var targetName = packet.ReadString();
-
-            var party = _partyManager.FindParty(client.TamerId);
-
-            if (party != null)
+            try
             {
-                var membersList = party.GetMembersIdList();
-                var bannedTargetKey = party[targetName].Key;
-                var partyMemberToKick = party.Members.First(x => x.Value.Name == targetName);
+                var packet = new GamePacketReader(packetData);
+                var targetNameRaw = packet.ReadString();
+                var targetName = targetNameRaw?.Trim();
 
-                if (party.Members.Count > 2)
+                if (string.IsNullOrWhiteSpace(targetName))
                 {
-                    //_logger.Information($"{party.Members.Count} players was on party !!");
+                    client.Send(new SystemMessagePacket("Invalid target name."));
+                    _logger.Warning("PartyKick: empty target name from TamerId={TamerId}", client.TamerId);
+                    return;
+                }
 
-                    var partyMember = party[targetName].Value;
+                var party = _partyManager.FindParty(client.TamerId);
+                if (party == null)
+                {
+                    client.Send(new SystemMessagePacket("You are not in a party."));
+                    _logger.Warning("PartyKick: TamerId={TamerId} tried to kick {Target} but is not in a party", client.TamerId, targetName);
+                    return;
+                }
 
-                    var bannedClient = _mapServer.FindClientByTamerId(partyMember.Id);
+                // (Opcional) Apenas o líder pode expulsar: descomentar quando tiveres a info do líder exposta
+                // if (party.LeaderId != client.TamerId)
+                // {
+                //     client.Send(new SystemMessagePacket("Only the party leader can kick members."));
+                //     _logger.Information("PartyKick: unauthorized attempt by TamerId={TamerId} in PartyId={PartyId} to kick {Target}",
+                //         client.TamerId, party.Id, targetName);
+                //     return;
+                // }
 
-                    if (bannedClient == null) bannedClient = _dungeonServer.FindClientByTamerId(partyMember.Id);
+                // Encontra o membro alvo por nome (case-insensitive).
+                var kv = party.Members.FirstOrDefault(x =>
+                    x.Value?.Name != null &&
+                    x.Value.Name.Equals(targetName, StringComparison.OrdinalIgnoreCase));
 
-                    if (bannedClient != null) bannedClient.Send(new PartyMemberKickPacket(bannedTargetKey).Serialize());
+                if (kv.Equals(default))
+                {
+                    client.Send(new SystemMessagePacket($"Member '{targetName}' not found in your party."));
+                    _logger.Debug("PartyKick: member '{Target}' not found in PartyId={PartyId} (by TamerId={TamerId})",
+                        targetName, party.Id, client.TamerId);
+                    return;
+                }
 
-                    party.RemoveMember(bannedTargetKey);
+                byte bannedTargetKey = (byte)kv.Key;
+                var partyMemberToKick = kv.Value;
 
-                    // -------------------------------------------------------
+                // Não deixa expulsar quem não está realmente na party
+                if (partyMemberToKick == null)
+                {
+                    client.Send(new SystemMessagePacket($"Member '{targetName}' is invalid."));
+                    _logger.Warning("PartyKick: null member object for key '{Key}' in PartyId={PartyId}", bannedTargetKey, party.Id);
+                    return;
+                }
 
-                    var dungeonClient = _dungeonServer.FindClientByTamerId(partyMember.Id);
+                // Opcional: impedir expulsar a si próprio via "kick" (se queres forçar Leave separado)
+                // if (partyMemberToKick.Id == client.TamerId)
+                // {
+                //     client.Send(new SystemMessagePacket("Use Leave Party to leave the party."));
+                //     return;
+                // }
 
-                    if (dungeonClient != null)
-                    {
-                        //_logger.Information($"Kicked Player is in Dungeon");
+                var memberCount = party.Members.Count;
 
-                        var map = UtilitiesFunctions.MapGroup(dungeonClient.Tamer.Location.MapId);
-
-                        var mapConfig = await _sender.Send(new GameMapConfigByMapIdQuery(dungeonClient.Tamer.Location.MapId));
-                        var waypoints = await _sender.Send(new MapRegionListAssetsByMapIdQuery(map));
-
-                        if (mapConfig == null || waypoints == null || !waypoints.Regions.Any())
-                        {
-                            client.Send(new SystemMessagePacket($"Map information not found for map Id {map}."));
-                            _logger.Warning($"Map information not found for map Id {map} on character {client.TamerId} jump booster.");
-                            return;
-                        }
-
-                        var mapRegionIndex = mapConfig.MapRegionindex;
-                        var destination = waypoints.Regions.FirstOrDefault(x => x.Index == mapRegionIndex);
-
-                        _dungeonServer.RemoveClient(dungeonClient);
-
-                        dungeonClient.Tamer.NewLocation(map, destination.X, destination.Y);
-                        await _sender.Send(new UpdateCharacterLocationCommand(dungeonClient.Tamer.Location));
-
-                        dungeonClient.Tamer.Partner.NewLocation(map, destination.X, destination.Y);
-                        await _sender.Send(new UpdateDigimonLocationCommand(dungeonClient.Tamer.Partner.Location));
-
-                        dungeonClient.Tamer.UpdateState(CharacterStateEnum.Loading);
-                        await _sender.Send(new UpdateCharacterStateCommand(dungeonClient.TamerId, CharacterStateEnum.Loading));
-
-                        dungeonClient.SetGameQuit(false);
-
-                        dungeonClient.Send(new MapSwapPacket(_configuration[GamerServerPublic], _configuration[GameServerPort],
-                            dungeonClient.Tamer.Location.MapId, dungeonClient.Tamer.Location.X, dungeonClient.Tamer.Location.Y));
-                    }
-
-                    foreach (var target in party.Members.Values)
-                    {
-                        var targetClient = _mapServer.FindClientByTamerId(target.Id);
-
-                        if (targetClient == null) targetClient = _dungeonServer.FindClientByTamerId(target.Id);
-
-                        if (targetClient == null) continue;
-
-                        targetClient.Send(new PartyMemberKickPacket(bannedTargetKey).Serialize());
-                    }
-
+                if (memberCount > 2)
+                {
+                    await KickSingleMemberFlow(party, partyMemberToKick.Id, bannedTargetKey);
+                    _logger.Information("PartyKick: PartyId={PartyId} kicked '{Target}' (Id={TargetId}) by TamerId={TamerId}",
+                        party.Id, targetName, partyMemberToKick.Id, client.TamerId);
                 }
                 else
                 {
-                    //_logger.Information($"No more players on party !! Removing Party");
+                    var ids = party.GetMembersIdList(); // antes de remover
+                    var payload = new PartyMemberKickPacket(bannedTargetKey).Serialize();
 
-                    _dungeonServer.BroadcastForTargetTamers(membersList, new PartyMemberKickPacket(partyMemberToKick.Key).Serialize());
-                    _mapServer.BroadcastForTargetTamers(membersList, new PartyMemberKickPacket(partyMemberToKick.Key).Serialize());
+                    _dungeonServer.BroadcastForTargetTamers(ids, payload);
+                    _mapServer.BroadcastForTargetTamers(ids, payload);
 
-                    var memberList = party.Members.Values;
-
-                    foreach (var target in memberList)
+                    // Para cada membro ainda presente, se estiver em dungeon, teleporta para fora
+                    foreach (var m in party.Members.Values.ToList())
                     {
-                        var targetClient = _dungeonServer.FindClientByTamerId(target.Id);
-
+                        var targetClient = _dungeonServer.FindClientByTamerId(m.Id);
                         if (targetClient == null) continue;
-
-                        // -- Teleport player outside of Dungeon ---------------------------------
-                        var map = UtilitiesFunctions.MapGroup(targetClient.Tamer.Location.MapId);
-
-                        var mapConfig = await _sender.Send(new GameMapConfigByMapIdQuery(targetClient.Tamer.Location.MapId));
-                        var waypoints = await _sender.Send(new MapRegionListAssetsByMapIdQuery(map));
-
-                        if (mapConfig == null || waypoints == null || !waypoints.Regions.Any())
-                        {
-                            client.Send(new SystemMessagePacket($"Map information not found for map Id {map}."));
-                            _logger.Warning($"Map information not found for map Id {map} on character {client.TamerId} jump booster.");
-                            return;
-                        }
-
-                        var mapRegionIndex = mapConfig.MapRegionindex;
-                        var destination = waypoints.Regions.FirstOrDefault(x => x.Index == mapRegionIndex);
-
-                        _dungeonServer.RemoveClient(targetClient);
-
-                        targetClient.Tamer.NewLocation(map, destination.X, destination.Y);
-                        await _sender.Send(new UpdateCharacterLocationCommand(targetClient.Tamer.Location));
-
-                        targetClient.Tamer.Partner.NewLocation(map, destination.X, destination.Y);
-                        await _sender.Send(new UpdateDigimonLocationCommand(targetClient.Tamer.Partner.Location));
-
-                        targetClient.Tamer.UpdateState(CharacterStateEnum.Loading);
-                        await _sender.Send(new UpdateCharacterStateCommand(targetClient.TamerId, CharacterStateEnum.Loading));
-
-                        targetClient.SetGameQuit(false);
-
-                        targetClient.Send(new MapSwapPacket(_configuration[GamerServerPublic], _configuration[GameServerPort],
-                            targetClient.Tamer.Location.MapId, targetClient.Tamer.Location.X, targetClient.Tamer.Location.Y));
+                        await TeleportOutOfDungeon(targetClient);
                     }
 
                     _partyManager.RemoveParty(party.Id);
+                    _logger.Information("PartyKick: disbanded PartyId={PartyId} after kick of '{Target}' (members <= 2)", party.Id, targetName);
                 }
             }
-            else
+            catch (Exception ex)
             {
-                client.Send(new SystemMessagePacket($"The target tamer is not in a party."));
-                _logger.Warning($"Character {client.TamerId} kicked {targetName} from the party but he/she was not in the party.");
-                return;
+                _logger.Error(ex, "PartyKick: exception processing kick by TamerId={TamerId}", client.TamerId);
+            }
+        }
+
+        private GameClient? FindClient(long tamerId)
+        {
+            var c = _mapServer.FindClientByTamerId(tamerId);
+            return c ?? _dungeonServer.FindClientByTamerId(tamerId);
+        }
+        private async Task KickSingleMemberFlow(GameParty party, long tamerIdToKick, byte bannedTargetKey)
+        {
+            var payload = new PartyMemberKickPacket(bannedTargetKey).Serialize();
+
+            var bannedClient = FindClient(tamerIdToKick);
+            if (bannedClient != null) bannedClient.Send(payload);
+
+            party.RemoveMember(bannedTargetKey);
+
+            var dungeonClient = _dungeonServer.FindClientByTamerId(tamerIdToKick);
+            if (dungeonClient != null) await TeleportOutOfDungeon(dungeonClient);
+
+            foreach (var target in party.Members.Values)
+            {
+                var tc = FindClient(target.Id);
+                if (tc != null) tc.Send(payload);
+            }
+        }
+
+        private async Task TeleportOutOfDungeon(GameClient client)
+        {
+            try
+            {
+                var mapGroupId = UtilitiesFunctions.MapGroup(client.Tamer.Location.MapId);
+
+                var mapConfig = await _sender.Send(new GameMapConfigByMapIdQuery(client.Tamer.Location.MapId));
+                var waypoints = await _sender.Send(new MapRegionListAssetsByMapIdQuery(mapGroupId));
+
+                if (mapConfig == null || waypoints == null || !waypoints.Regions.Any())
+                {
+                    client.Send(new SystemMessagePacket($"Map information not found for map Id {mapGroupId}."));
+                    _logger.Warning("TeleportOutOfDungeon: map info not found for mapId={Map} (tamerId={TamerId})",
+                        mapGroupId, client.TamerId);
+                    return;
+                }
+
+                var destination = waypoints.Regions.FirstOrDefault(x => x.Index == mapConfig.MapRegionindex);
+                if (destination == null)
+                {
+                    client.Send(new SystemMessagePacket($"Spawn point not found for map Id {mapGroupId}."));
+                    _logger.Warning("TeleportOutOfDungeon: spawn not found for mapId={Map}, index={Index} (tamerId={TamerId})",
+                        mapGroupId, mapConfig.MapRegionindex, client.TamerId);
+                    return;
+                }
+
+                _dungeonServer.RemoveClient(client);
+
+                client.Tamer.NewLocation(mapGroupId, destination.X, destination.Y);
+                await _sender.Send(new UpdateCharacterLocationCommand(client.Tamer.Location));
+
+                client.Tamer.Partner.NewLocation(mapGroupId, destination.X, destination.Y);
+                await _sender.Send(new UpdateDigimonLocationCommand(client.Tamer.Partner.Location));
+
+                client.Tamer.UpdateState(CharacterStateEnum.Loading);
+                await _sender.Send(new UpdateCharacterStateCommand(client.TamerId, CharacterStateEnum.Loading));
+
+                client.SetGameQuit(false);
+
+                client.Send(new MapSwapPacket(
+                    _configuration[GamerServerPublic] ?? _configuration[GameServerAddress],
+                    _configuration[GameServerPort],
+                    client.Tamer.Location.MapId,
+                    client.Tamer.Location.X,
+                    client.Tamer.Location.Y
+                ));
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "TeleportOutOfDungeon: error while moving TamerId={TamerId} out", client.TamerId);
             }
         }
     }

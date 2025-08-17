@@ -15,7 +15,7 @@ namespace DigitalWorldOnline.Admin
                 .ConfigureWebHostDefaults(webBuilder =>
                 {
                     webBuilder.UseStartup<Startup>();
-                    webBuilder.UseUrls("http://*:41001", "https://*:5002");
+                    webBuilder.UseUrls("http://*:41001", "http://*:5002");
                 });
     }
 }

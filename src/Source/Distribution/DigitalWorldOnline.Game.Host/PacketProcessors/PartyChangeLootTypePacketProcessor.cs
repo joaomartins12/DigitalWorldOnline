@@ -1,4 +1,6 @@
-﻿using DigitalWorldOnline.Commons.Entities;
+﻿using System;
+using System.Collections.Generic;
+using DigitalWorldOnline.Commons.Entities;
 using DigitalWorldOnline.Commons.Enums.PacketProcessor;
 using DigitalWorldOnline.Commons.Enums.Party;
 using DigitalWorldOnline.Commons.Interfaces;
@@ -30,32 +32,77 @@ namespace DigitalWorldOnline.Game.PacketProcessors
             _logger = logger;
         }
 
-
         public Task Process(GameClient client, byte[] packetData)
         {
-            var packet = new GamePacketReader(packetData);
-            var lootType = (PartyLootShareTypeEnum)packet.ReadInt();
-            var rareType = (PartyLootShareRarityEnum)packet.ReadByte();
-
-            var party = _partyManager.FindParty(client.TamerId);
-
-            if(party != null)
+            try
             {
+                var packet = new GamePacketReader(packetData);
+
+                var lootTypeRaw = packet.ReadInt();
+                var rareTypeRaw = packet.ReadByte();
+
+                // Validação de enums recebidos
+                if (!Enum.IsDefined(typeof(PartyLootShareTypeEnum), lootTypeRaw) ||
+                    !Enum.IsDefined(typeof(PartyLootShareRarityEnum), (int)rareTypeRaw))
+                {
+                    _logger.Warning(
+                        "PartyChangeLootType: invalid params from TamerId={TamerId} (lootType={LootType}, rareType={RareType})",
+                        client.TamerId, lootTypeRaw, rareTypeRaw
+                    );
+                    return Task.CompletedTask;
+                }
+
+                var lootType = (PartyLootShareTypeEnum)lootTypeRaw;
+                var rareType = (PartyLootShareRarityEnum)rareTypeRaw;
+
+                var party = _partyManager.FindParty(client.TamerId);
+                if (party == null)
+                {
+                    _logger.Debug(
+                        "PartyChangeLootType: no party found for TamerId={TamerId}",
+                        client.TamerId
+                    );
+                    return Task.CompletedTask;
+                }
+
+                // (Opcional) Autorização: somente líder pode alterar
+                // Se o teu GameParty expõe LeaderId/IsLeader, ativa o check abaixo.
+                // if (party.LeaderId != client.TamerId) {
+                //     _logger.Information("PartyChangeLootType: unauthorized attempt by TamerId={TamerId} in PartyId={PartyId}", client.TamerId, party.Id);
+                //     return Task.CompletedTask;
+                // }
+
                 party.ChangeLootType(lootType, rareType);
 
-                foreach (var target in party.Members.Values)
+                // Broadcast para todos na party (mapa ou dungeon)
+                var notified = 0;
+                foreach (var member in party.Members.Values)
                 {
-
-                    var targetClient = _mapServer.FindClientByTamerId(target.Id);
-                    if (targetClient == null) targetClient = _dungeonServer.FindClientByTamerId(target.Id);
-
-                    if (targetClient == null)
-                        continue;
+                    var targetClient = FindClientByTamerId(member.Id);
+                    if (targetClient == null) continue;
 
                     targetClient.Send(new PartyChangeLootTypePacket(lootType, rareType));
+                    notified++;
                 }
+
+                _logger.Information(
+                    "PartyChangeLootType: PartyId={PartyId} set to LootType={LootType}, RareType={RareType} by TamerId={TamerId}. Notified={Notified}",
+                    party.Id, lootType, rareType, client.TamerId, notified
+                );
             }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "PartyChangeLootType: exception processing packet for TamerId={TamerId}", client.TamerId);
+            }
+
             return Task.CompletedTask;
+        }
+
+        private GameClient? FindClientByTamerId(long tamerId)
+        {
+            var c = _mapServer.FindClientByTamerId(tamerId);
+            if (c != null) return c;
+            return _dungeonServer.FindClientByTamerId(tamerId);
         }
     }
 }

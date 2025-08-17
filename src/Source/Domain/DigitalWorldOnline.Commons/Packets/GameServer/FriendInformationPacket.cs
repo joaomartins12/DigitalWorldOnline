@@ -7,7 +7,7 @@ namespace DigitalWorldOnline.Commons.Packets.GameServer
         private const int PacketNumber = 3129;
 
         /// <summary>
-        /// Load the tamer's friend information.
+        /// Load the tamer's friend information (header).
         /// </summary>
         public FriendInformationPacket()
         {

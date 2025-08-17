@@ -45,11 +45,11 @@ namespace DigitalWorldOnline.Game.PacketProcessors
             byte OrderSlot = packet.ReadByte();
 
             var itemInfo = client.Tamer.Inventory.FindItemBySlot(sourceSlot);
-         
+
             if (itemInfo != null)
             {
                 var avaliableSocket = itemInfo.SocketStatus.First(x => x.Slot == OrderSlot);
-              
+
                 if (avaliableSocket != null)
                 {
                     var newItem = new ItemModel();
@@ -73,7 +73,7 @@ namespace DigitalWorldOnline.Game.PacketProcessors
 
                     var itemClone = (ItemModel)newItem.Clone();
 
-                    if(client.Tamer.Inventory.AddItem(itemClone))
+                    if (client.Tamer.Inventory.AddItem(itemClone))
                     {
                         await _sender.Send(new UpdateItemSocketStatusCommand(itemClone));
                         await _sender.Send(new UpdateItemAccessoryStatusCommand(itemClone));
@@ -82,11 +82,11 @@ namespace DigitalWorldOnline.Game.PacketProcessors
                     {
                         client.Send(new PickItemFailPacket(PickItemFailReasonEnum.InventoryFull));
                     }
-                  
+
                     avaliableSocket.SetType(0);
                     avaliableSocket.SetAttributeId(0);
                     avaliableSocket.SetValue(0);
-                  
+
                 }
 
 

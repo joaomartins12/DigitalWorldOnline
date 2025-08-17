@@ -13,9 +13,8 @@ using DigitalWorldOnline.Commons.Packets.Chat;
 using DigitalWorldOnline.Commons.Packets.GameServer;
 using DigitalWorldOnline.Commons.Packets.Items;
 using DigitalWorldOnline.Commons.Utils;
-using DigitalWorldOnline.Commons.Writers;
-using DigitalWorldOnline.Game.Managers;
 using DigitalWorldOnline.GameHost;
+using DigitalWorldOnline.Game.Managers;
 using MediatR;
 using Serilog;
 
@@ -53,157 +52,188 @@ namespace DigitalWorldOnline.Game.PacketProcessors
         {
             var packet = new GamePacketReader(packetData);
 
-            var targetType = packet.ReadInt();
-            var digiName = packet.ReadString();
-            var x = packet.ReadByte();
-            var NpcId = packet.ReadInt();
+            var targetType = packet.ReadInt();     // Digimon base type a nascer (spirit)
+            var digiName = packet.ReadString();  // nome escolhido
+            _ = packet.ReadByte();                 // byte sem uso no protocolo original
+            var npcId = packet.ReadInt();     // NPC que executa a evolução extra
 
-            var extraEvolutionNpc = _assets.ExtraEvolutions.FirstOrDefault(x => x.NpcId == NpcId);
-
+            // 1) Npc e configuração
+            var extraEvolutionNpc = _assets.ExtraEvolutions.FirstOrDefault(x => x.NpcId == npcId);
             if (extraEvolutionNpc == null)
             {
-                _logger.Warning($"Extra Evolution NPC not found for Hatch !!");
+                _logger.Warning("[HatchSpirit] ExtraEvolution NPC {NpcId} não encontrado.", npcId);
+                client.Send(new SystemMessagePacket("NPC inválido para Spirit Evolution."));
                 return;
             }
 
-            var extraEvolutionInfo = extraEvolutionNpc.ExtraEvolutionInformation.FirstOrDefault(x => x.ExtraEvolution.Any(x => x.DigimonId == targetType))?.ExtraEvolution;
+            var extraEvolutionInfo = extraEvolutionNpc
+                .ExtraEvolutionInformation
+                .FirstOrDefault(info => info.ExtraEvolution.Any(e => e.DigimonId == targetType))
+                ?.ExtraEvolution;
 
             if (extraEvolutionInfo == null)
             {
-                _logger.Warning($"extraEvolutionInfo == null");
+                _logger.Warning("[HatchSpirit] Nenhuma configuração ExtraEvolution para o DigimonId {Type} no NPC {NpcId}.", targetType, npcId);
+                client.Send(new SystemMessagePacket("Configuração de Spirit Evolution não encontrada."));
                 return;
             }
 
             var extraEvolution = extraEvolutionInfo.FirstOrDefault(x => x.DigimonId == targetType);
-
             if (extraEvolution == null)
             {
-                _logger.Warning($"extraEvolution == null");
+                _logger.Warning("[HatchSpirit] ExtraEvolution nula para Type={Type} no NPC {NpcId}.", targetType, npcId);
+                client.Send(new SystemMessagePacket("Configuração de Spirit Evolution inválida."));
                 return;
             }
 
-            if (!client.Tamer.Inventory.RemoveBits(extraEvolution.Price))
+            // 2) Verifica slot livre
+            byte freeSlot = 0;
+            while (freeSlot < client.Tamer.DigimonSlots && client.Tamer.Digimons.Any(d => d.Slot == freeSlot))
+                freeSlot++;
+
+            if (freeSlot >= client.Tamer.DigimonSlots)
             {
-                client.Send(new SystemMessagePacket($"Insuficient bits !!"));
-                _logger.Warning($"Insuficient bits for hatch in NPC Id: {NpcId} for tamer {client.TamerId}.");
+                client.Send(new SystemMessagePacket("Sem espaço nos slots de Digimon."));
                 return;
             }
 
-            var materialToPacket = new List<ExtraEvolutionMaterialAssetModel>();
-            var requiredsToPacket = new List<ExtraEvolutionRequiredAssetModel>();
-
-            foreach (var material in extraEvolution.Materials)
+            // 3) Verifica recursos (bits + materiais + requireds) ANTES de consumir
+            if (client.Tamer.Inventory.Bits < extraEvolution.Price)
             {
-                var itemToRemove = client.Tamer.Inventory.FindItemById(material.ItemId);
+                client.Send(new SystemMessagePacket("Bits insuficientes."));
+                _logger.Warning("[HatchSpirit] Bits insuficientes. Precisa {Price}, tem {Bits}.",
+                    extraEvolution.Price, client.Tamer.Inventory.Bits);
+                return;
+            }
 
-                if (itemToRemove != null)
+            // Material: exige 1 dos listados (no teu fluxo original remove o primeiro que tiver)
+            ExtraEvolutionMaterialAssetModel? chosenMaterial = null;
+            foreach (var mat in extraEvolution.Materials)
+            {
+                var item = client.Tamer.Inventory.FindItemById(mat.ItemId);
+                if (item != null && item.Amount >= mat.Amount)
                 {
-                    materialToPacket.Add(material);
-                    client.Tamer.Inventory.RemoveOrReduceItemWithoutSlot(new ItemModel(material.ItemId, material.Amount));
-
+                    chosenMaterial = mat;
                     break;
                 }
             }
-
-            foreach (var material in extraEvolution.Requireds)
+            if (extraEvolution.Materials.Any() && chosenMaterial == null)
             {
-                var itemToRemove = client.Tamer.Inventory.FindItemById(material.ItemId);
+                client.Send(new SystemMessagePacket("Materiais insuficientes para esta Spirit Evolution."));
+                _logger.Warning("[HatchSpirit] Falta material obrigatório. Nenhum dos itens {Ids} disponível.",
+                    string.Join(", ", extraEvolution.Materials.Select(m => $"{m.ItemId}x{m.Amount}")));
+                return;
+            }
 
-                if (itemToRemove != null)
+            // Requireds: pode ter de 1 a N exigências. No teu código original remove até 3; aqui valida todos listados
+            var requiredsSatisfied = new List<ExtraEvolutionRequiredAssetModel>();
+            foreach (var req in extraEvolution.Requireds)
+            {
+                var item = client.Tamer.Inventory.FindItemById(req.ItemId);
+                if (item == null || item.Amount < req.Amount)
                 {
-                    requiredsToPacket.Add(material);
-                    client.Tamer.Inventory.RemoveOrReduceItemWithoutSlot(new ItemModel(material.ItemId, material.Amount));
-
-                    if (extraEvolution.Requireds.Count <= 3)
-                    {
-                        break;
-                    }
+                    client.Send(new SystemMessagePacket("Itens obrigatórios insuficientes para esta Spirit Evolution."));
+                    _logger.Warning("[HatchSpirit] Requisito ausente: ItemId {ItemId} x{Amount}.", req.ItemId, req.Amount);
+                    return;
                 }
+                requiredsSatisfied.Add(req);
             }
 
-            byte i = 0;
-            while (i < client.Tamer.DigimonSlots)
+            // 4) Consome recursos (agora com segurança)
+            client.Tamer.Inventory.RemoveBits(extraEvolution.Price);
+
+            var materialsUsedForPacket = new List<ExtraEvolutionMaterialAssetModel>();
+            var requiredsUsedForPacket = new List<ExtraEvolutionRequiredAssetModel>();
+
+            if (chosenMaterial != null)
             {
-                if (client.Tamer.Digimons.FirstOrDefault(x => x.Slot == i) == null)
-                    break;
-
-                i++;
+                client.Tamer.Inventory.RemoveOrReduceItemWithoutSlot(new ItemModel(chosenMaterial.ItemId, chosenMaterial.Amount));
+                materialsUsedForPacket.Add(chosenMaterial);
             }
 
+            foreach (var req in requiredsSatisfied)
+            {
+                client.Tamer.Inventory.RemoveOrReduceItemWithoutSlot(new ItemModel(req.ItemId, req.Amount));
+                requiredsUsedForPacket.Add(req);
+            }
+
+            // 5) Cria o Digimon
             var newDigimon = DigimonModel.Create(
                 digiName,
                 targetType,
                 targetType,
                 DigimonHatchGradeEnum.Default,
                 UtilitiesFunctions.GetLevelSize(3),
-                i
+                freeSlot
             );
 
             newDigimon.NewLocation(client.Tamer.Location.MapId, client.Tamer.Location.X, client.Tamer.Location.Y);
-
             newDigimon.SetBaseInfo(_statusManager.GetDigimonBaseInfo(newDigimon.BaseType));
-
             newDigimon.SetBaseStatus(_statusManager.GetDigimonBaseStatus(newDigimon.BaseType, newDigimon.Level, newDigimon.Size));
-
             newDigimon.AddEvolutions(_assets.EvolutionInfo.First(x => x.Type == newDigimon.BaseType));
 
             if (newDigimon.BaseInfo == null || newDigimon.BaseStatus == null || !newDigimon.Evolutions.Any())
             {
-                _logger.Warning($"Unknown digimon info for {newDigimon.BaseType}.");
-                client.Send(new SystemMessagePacket($"Unknown digimon info for {newDigimon.BaseType}."));
+                _logger.Warning("[HatchSpirit] Informações do Digimon {Type} incompletas (base/basestatus/evolutions).", newDigimon.BaseType);
+                client.Send(new SystemMessagePacket($"Informações do Digimon {newDigimon.BaseType} indisponíveis."));
                 return;
             }
 
             newDigimon.SetTamer(client.Tamer);
-
             client.Tamer.AddDigimon(newDigimon);
 
+            // 6) Mensagens de “perfeito”
             if (client.Tamer.Incubator.PerfectSize(newDigimon.HatchGrade, newDigimon.Size))
             {
-                _mapServer.BroadcastGlobal(new NeonMessagePacket(NeonMessageTypeEnum.Scale, client.Tamer.Name, newDigimon.BaseType, newDigimon.Size).Serialize());
-                _dungeonServer.BroadcastGlobal(new NeonMessagePacket(NeonMessageTypeEnum.Scale, client.Tamer.Name, newDigimon.BaseType, newDigimon.Size).Serialize());
+                var neon = new NeonMessagePacket(NeonMessageTypeEnum.Scale, client.Tamer.Name, newDigimon.BaseType, newDigimon.Size).Serialize();
+                _mapServer.BroadcastGlobal(neon);
+                _dungeonServer.BroadcastGlobal(neon);
             }
 
+            // 7) Persistência
             var digimonInfo = await _sender.Send(new CreateDigimonCommand(newDigimon));
-
-            client.Send(new HatchFinishPacket(newDigimon, (ushort)(client.Partner.GeneralHandler + 1000), client.Tamer.Digimons.FindIndex(x => x == newDigimon)));
-
-            client.Send(new HatchSpiritEvolutionPacket(targetType, (int)client.Tamer.Inventory.Bits, materialToPacket, requiredsToPacket));
-            client.Send(new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory));
-
-            await _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
-            await _sender.Send(new UpdateItemListBitsCommand(client.Tamer.Inventory.Id, client.Tamer.Inventory.Bits));
-
             if (digimonInfo != null)
             {
                 newDigimon.SetId(digimonInfo.Id);
-                var slot = -1;
 
-                foreach (var digimon in newDigimon.Evolutions)
+                // amarra IDs das evoluções/skills criadas no banco
+                var idx = -1;
+                foreach (var evo in newDigimon.Evolutions)
                 {
-                    slot++;
+                    idx++;
+                    var dto = digimonInfo.Evolutions[idx];
+                    if (dto == null) continue;
 
-                    var evolution = digimonInfo.Evolutions[slot];
+                    evo.SetId(dto.Id);
 
-                    if (evolution != null)
+                    var sIdx = -1;
+                    foreach (var sk in evo.Skills)
                     {
-                        digimon.SetId(evolution.Id);
-
-                        var skillSlot = -1;
-
-                        foreach (var skill in digimon.Skills)
-                        {
-                            skillSlot++;
-
-                            var dtoSkill = evolution.Skills[skillSlot];
-
-                            skill.SetId(dtoSkill.Id);
-                        }
+                        sIdx++;
+                        var dtoSkill = dto.Skills[sIdx];
+                        sk.SetId(dtoSkill.Id);
                     }
                 }
             }
 
-            _logger.Verbose($"Character {client.TamerId} hatched spirit {newDigimon.Id}({newDigimon.BaseType}) with grade {newDigimon.HatchGrade} and size {newDigimon.Size}.");
+            await _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
+            await _sender.Send(new UpdateItemListBitsCommand(client.Tamer.Inventory.Id, client.Tamer.Inventory.Bits));
+
+            // 8) Pacotes de retorno
+            client.Send(new HatchFinishPacket(newDigimon, (ushort)(client.Partner.GeneralHandler + 1000),
+                client.Tamer.Digimons.FindIndex(x => x == newDigimon)));
+
+            client.Send(new HatchSpiritEvolutionPacket(
+                targetType,
+                (int)client.Tamer.Inventory.Bits,
+                materialsUsedForPacket,
+                requiredsUsedForPacket
+            ));
+
+            client.Send(new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory));
+
+            _logger.Verbose("[HatchSpirit] Tamer {TamerId} hatchou spirit {DigiId} ({Type}) grade {Grade} size {Size}.",
+                client.TamerId, newDigimon.Id, newDigimon.BaseType, newDigimon.HatchGrade, newDigimon.Size);
         }
     }
 }

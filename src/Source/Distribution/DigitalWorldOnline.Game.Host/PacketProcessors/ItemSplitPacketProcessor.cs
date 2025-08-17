@@ -62,7 +62,7 @@ namespace DigitalWorldOnline.Game.PacketProcessors
                         var sourceItem = client.Tamer.Inventory.FindItemBySlot(originSlot);
                         var temp = (ItemModel)sourceItem.Clone();
                         temp.SetAmount(amountToSplit);
-                     
+
                         if (client.Tamer.Inventory.SplitItem(temp, destinationSlot))
                         {
                             sourceItem.ReduceAmount(amountToSplit);

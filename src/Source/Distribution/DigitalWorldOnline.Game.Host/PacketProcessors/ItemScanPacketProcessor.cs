@@ -1,6 +1,5 @@
 ﻿using DigitalWorldOnline.Application;
 using DigitalWorldOnline.Application.Separar.Commands.Update;
-using DigitalWorldOnline.Commons.DTOs.Base;
 using DigitalWorldOnline.Commons.Entities;
 using DigitalWorldOnline.Commons.Enums;
 using DigitalWorldOnline.Commons.Enums.ClientEnums;
@@ -13,11 +12,12 @@ using DigitalWorldOnline.Commons.Packets.GameServer;
 using DigitalWorldOnline.Commons.Packets.Items;
 using DigitalWorldOnline.Commons.Utils;
 using DigitalWorldOnline.GameHost;
-using DigitalWorldOnline.Infraestructure.Migrations;
 using MediatR;
 using Serilog;
-using System.Net.Mime;
-
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 
 namespace DigitalWorldOnline.Game.PacketProcessors
 {
@@ -47,7 +47,7 @@ namespace DigitalWorldOnline.Game.PacketProcessors
             var packet = new GamePacketReader(packetData);
 
             var vipEnabled = packet.ReadByte();
-            var u2 = packet.ReadInt();
+            var _ = packet.ReadInt(); // valor ignorado (u2)
             var npcId = packet.ReadInt();
             var slotToScan = packet.ReadInt();
             var amountToScan = packet.ReadShort();
@@ -62,13 +62,14 @@ namespace DigitalWorldOnline.Game.PacketProcessors
 
             if (client.Tamer.Inventory.CountItensById(scannedItem.ItemId) < amountToScan)
             {
-                await _mapServer.CallDiscord($"try DUPPING in SCANN {amountToScan}x {scannedItem.ItemInfo.Name}, but he has {scannedItem.Amount}x!", client, "e06666", "DISCONNECTED", "1280704020469514291");
+                await _mapServer.CallDiscord(
+                    $"try DUPPING in SCANN {amountToScan}x {scannedItem.ItemInfo.Name}, but he has {scannedItem.Amount}x!",
+                    client, "e06666", "DISCONNECTED", "1280704020469514291");
                 client.Disconnect();
                 return;
             }
 
             var scanAsset = _assets.ScanDetail.FirstOrDefault(x => x.ItemId == scannedItem.ItemId);
-
             if (scanAsset == null)
             {
                 client.Send(
@@ -114,7 +115,7 @@ namespace DigitalWorldOnline.Game.PacketProcessors
                         contentItem.SetItemId(possibleReward.ItemId);
                         contentItem.SetAmount(itemRewardAmount);
                         contentItem.SetItemInfo(_assets.ItemInfo.FirstOrDefault(x => x.ItemId == possibleReward.ItemId));
-    
+
                         if (contentItem.ItemInfo == null)
                         {
                             _logger.Warning($"Invalid item info for item {possibleReward.ItemId} in tamer {client.TamerId} scan.");
@@ -123,12 +124,11 @@ namespace DigitalWorldOnline.Game.PacketProcessors
                             break;
                         }
 
+                        // Aplicar valores de Chipset se necessário
                         if (contentItem.ItemInfo.Section == 5200)
                         {
-                            var ChipsetItem = ApplyValuesChipset(contentItem);
-                            //await _sender.Send(new UpdateItemAccessoryStatusCommand(contentItem));
+                            ApplyValuesChipset(contentItem);
                         }
-
 
                         if (contentItem.IsTemporary)
                             contentItem.SetRemainingTime((uint)contentItem.ItemInfo.UsageTimeMinutes);
@@ -158,9 +158,11 @@ namespace DigitalWorldOnline.Game.PacketProcessors
 
                         if (client.Tamer.Inventory.AddItem(contentItem))
                         {
-
                             if (possibleReward.Rare)
-                                _mapServer.BroadcastForChannel(client.Tamer.Channel, new NeonMessagePacket(NeonMessageTypeEnum.Item, client.Tamer.Name, scanAsset.ItemId, possibleReward.ItemId).Serialize());
+                                _mapServer.BroadcastForChannel(
+                                    client.Tamer.Channel,
+                                    new NeonMessagePacket(NeonMessageTypeEnum.Item, client.Tamer.Name, scanAsset.ItemId, possibleReward.ItemId).Serialize()
+                                );
 
                             cost += scannedItem.ItemInfo.ScanPrice;
                             scannedItens++;
@@ -178,6 +180,7 @@ namespace DigitalWorldOnline.Game.PacketProcessors
                 }
             }
 
+            // Envia o pacote de sucesso
             client.Send(new ItemScanSuccessPacket(
                 cost,
                 client.Tamer.Inventory.Bits - cost,
@@ -189,54 +192,59 @@ namespace DigitalWorldOnline.Game.PacketProcessors
             var dropList = string.Join(',', receivedRewards.Select(x => $"{x.Value.ItemId} x{x.Value.Amount}"));
 
             if (vipEnabled == 1)
-            {
                 _logger.Verbose($"Character {client.TamerId} scanned {scannedItem.ItemId} x{scannedItens} with VIP and obtained {dropList}");
-            }
             else
-            {
                 _logger.Verbose($"Character {client.TamerId} scanned {scannedItem.ItemId} x{scannedItens} at {client.TamerLocation} with NPC {npcId} and obtained {dropList}");
-            }
 
+            // Remove custos e itens escaneados
             client.Tamer.Inventory.RemoveBits(cost);
             client.Tamer.Inventory.RemoveOrReduceItem(scannedItem, scannedItens, slotToScan);
 
+            // Atualiza progresso de quest
             var scanQuest = client.Tamer.Progress.InProgressQuestData.FirstOrDefault(x => x.QuestId == 4021);
             if (scanQuest != null && scanAsset.ItemId == 9071)
             {
                 scanQuest.UpdateCondition(0, 1);
                 client.Send(new QuestGoalUpdatePacket(4021, 0, 1));
                 var questToUpdate = client.Tamer.Progress.InProgressQuestData.FirstOrDefault(x => x.QuestId == 4021);
-                _sender.Send(new UpdateCharacterInProgressCommand(questToUpdate));
+                if (questToUpdate != null)
+                    await _sender.Send(new UpdateCharacterInProgressCommand(questToUpdate));
             }
 
+            // Atualiza inventário e bits no banco
             await _sender.Send(new UpdateItemListBitsCommand(client.Tamer.Inventory));
             await _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
         }
-        private ItemModel? ApplyValuesChipset(ItemModel newItem)
+
+        private ItemModel ApplyValuesChipset(ItemModel newItem)
         {
+            var chipsetInfo = _assets.SkillCodeInfo
+                .FirstOrDefault(x => x.SkillCode == newItem.ItemInfo.SkillCode)?
+                .Apply.FirstOrDefault(x => x.Type > 0);
 
-            var ChipsetInfo = _assets.SkillCodeInfo.FirstOrDefault(x => x.SkillCode == newItem.ItemInfo.SkillCode).Apply.FirstOrDefault(x => x.Type > 0);
-            var ChipsetSkill = _assets.SkillInfo.FirstOrDefault(x => x.SkillId == newItem.ItemInfo.SkillCode).FamilyType;
-            // Definindo o valor mínimo e máximo para o RNG
+            var chipsetSkill = _assets.SkillInfo
+                .FirstOrDefault(x => x.SkillId == newItem.ItemInfo.SkillCode)?.FamilyType ?? 0;
 
-            Random random = new Random();
-            int ApplyRate = random.Next(newItem.ItemInfo.ApplyValueMin, newItem.ItemInfo.ApplyValueMax);
-            var nValue = ChipsetInfo.Value + (newItem.ItemInfo.TypeN) * ChipsetInfo.AdditionalValue;
+            if (chipsetInfo == null)
+                return newItem;
 
-            int valorAleatorio = (int)((double)ApplyRate * nValue / 100);
+            var random = new Random();
+            int applyRate = random.Next(newItem.ItemInfo.ApplyValueMin, newItem.ItemInfo.ApplyValueMax);
+            var nValue = chipsetInfo.Value + (newItem.ItemInfo.TypeN) * chipsetInfo.AdditionalValue;
+
+            int valorAleatorio = (int)((double)applyRate * nValue / 100);
 
             newItem.AccessoryStatus = newItem.AccessoryStatus.OrderBy(x => x.Slot).ToList();
-
-            var possibleStatus = (AccessoryStatusTypeEnum)ChipsetInfo.Attribute;
+            var possibleStatus = (AccessoryStatusTypeEnum)chipsetInfo.Attribute;
 
             newItem.AccessoryStatus[0].SetType(possibleStatus);
             newItem.AccessoryStatus[0].SetValue((short)valorAleatorio);
 
-            newItem.SetPower((byte)ApplyRate); //TODO: externalizar
-            newItem.SetReroll((byte)100);
-            newItem.SetFamilyType(ChipsetSkill);
+            newItem.SetPower((byte)applyRate);
+            newItem.SetReroll(100);
+            newItem.SetFamilyType(chipsetSkill);
+
             return newItem;
         }
-
     }
 }
