@@ -9,6 +9,8 @@ namespace DigitalWorldOnline.GameHost
 {
     public sealed partial class DungeonsServer
     {
+        private static readonly Random Rng = Random.Shared;
+
         private readonly PartyManager _partyManager;
         private readonly StatusManager _statusManager;
         private readonly ExpManager _expManager;

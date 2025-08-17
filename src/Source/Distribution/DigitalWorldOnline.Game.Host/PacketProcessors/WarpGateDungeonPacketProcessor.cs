@@ -56,188 +56,265 @@ namespace DigitalWorldOnline.Game.PacketProcessors
         public async Task Process(GameClient client, byte[] packetData)
         {
             var packet = new GamePacketReader(packetData);
-
             var portalId = packet.ReadInt();
 
-            //_logger.Information($"Dungeon PortalId: {portalId}");
+            // _logger.Information($"Dungeon PortalId: {portalId}");
 
+            // --------------------------------------------------------------------
+            // Procura portal com checks de null (antes de aceder a propriedades)
+            // --------------------------------------------------------------------
             var portal = _assets.Portal.FirstOrDefault(x => x.Id == portalId);
-
-            var portalRequestInfo = _assets.Npcs.FirstOrDefault(x => x.NpcId == portal.NpcId)?.Portals.ToList();
 
             if (portal == null)
             {
                 client.Send(new SystemMessagePacket($"Portal {portalId} not found."));
                 _logger.Error($"Portal id {portalId} not found.");
 
-                var mapId = client.Tamer.Location.MapId;
+                var fallbackMapId = client.Tamer.Location.MapId;
 
-                var mapConfig = await _sender.Send(new GameMapConfigByMapIdQuery(mapId));
-                var waypoints = await _sender.Send(new MapRegionListAssetsByMapIdQuery(mapId));
+                var mapConfig = await _sender.Send(new GameMapConfigByMapIdQuery(fallbackMapId));
+                var waypoints = await _sender.Send(new MapRegionListAssetsByMapIdQuery(fallbackMapId));
 
                 if (mapConfig == null || waypoints == null || !waypoints.Regions.Any())
                 {
-                    client.Send(new SystemMessagePacket($"Map information not found for {mapId}"));
-                    _logger.Error($"Map information not found for {mapId}");
+                    client.Send(new SystemMessagePacket($"Map information not found for {fallbackMapId}"));
+                    _logger.Error($"Map information not found for {fallbackMapId}");
                     return;
                 }
 
+                // Volta para o primeiro waypoint do mapa atual
                 _mapServer.RemoveClient(client);
 
                 var destination = waypoints.Regions.First();
 
-                client.Tamer.NewLocation(mapId, destination.X, destination.Y);
+                client.Tamer.NewLocation(fallbackMapId, destination.X, destination.Y);
                 await _sender.Send(new UpdateCharacterLocationCommand(client.Tamer.Location));
 
-                client.Tamer.Partner.NewLocation(mapId, destination.X, destination.Y);
+                client.Tamer.Partner.NewLocation(fallbackMapId, destination.X, destination.Y);
                 await _sender.Send(new UpdateDigimonLocationCommand(client.Tamer.Partner.Location));
 
                 client.Tamer.UpdateState(CharacterStateEnum.Loading);
                 await _sender.Send(new UpdateCharacterStateCommand(client.TamerId, CharacterStateEnum.Loading));
 
-                client.Send(new MapSwapPacket(_configuration[GamerServerPublic], _configuration[GameServerPort],
-                        mapId, destination.X, destination.Y));
+                client.Send(new MapSwapPacket(
+                    _configuration[GamerServerPublic],
+                    _configuration[GameServerPort],
+                    fallbackMapId, destination.X, destination.Y));
+                return;
             }
-            else
+
+            // --------------------------------------------------------------------
+            // Processamento de custos do portal (itens / bits) se existirem
+            // --------------------------------------------------------------------
+            var npcPortals = _assets.Npcs.FirstOrDefault(x => x.NpcId == portal.NpcId)?.Portals?.ToList();
+
+            if (npcPortals != null && npcPortals.Count > 0)
             {
-                if (portalRequestInfo != null)
+                var npcPortalsAssets = npcPortals.SelectMany(x => x.PortalsAsset ?? Enumerable.Empty<dynamic>()).ToList();
+
+                // Valida o índice do portal
+                if (portal.PortalIndex >= 0 && portal.PortalIndex < npcPortalsAssets.Count)
                 {
-                    var Request = portalRequestInfo.SelectMany(x => x.PortalsAsset).ToList();
+                    var removeInfo = npcPortalsAssets[portal.PortalIndex];
 
-                    var RemoveInfo = Request[portal.PortalIndex];
+                    // Alguns assets usam arrays fixos; aqui iteramos com segurança
+                    var resources = (IEnumerable<dynamic>)(removeInfo?.npcPortalsAsset ?? Array.Empty<dynamic>());
 
-                    for (int i = 0; i < 3; i++)
+                    foreach (var res in resources)
                     {
-                        switch (RemoveInfo.npcPortalsAsset[i].Type)
+                        try
                         {
-                            case NpcResourceTypeEnum.Money:
-                                {
-                                    client.Tamer.Inventory.RemoveBits(RemoveInfo.npcPortalsAsset[i].ItemId);
-                                    await _sender.Send(new UpdateItemListBitsCommand(client.Tamer.Inventory));
-                                }
-                                break;
+                            // Nomes conforme os assets: Type, ItemId...
+                            var type = (NpcResourceTypeEnum)res.Type;
 
-                            case NpcResourceTypeEnum.Item:
-                                {
-                                    var targeItem = client.Tamer.Inventory.FindItemById(RemoveInfo.npcPortalsAsset[i].ItemId);
-
-                                    if (targeItem != null)
+                            switch (type)
+                            {
+                                case NpcResourceTypeEnum.Money:
                                     {
-                                        client.Tamer.Inventory.RemoveOrReduceItem(targeItem, 1);
-                                        await _sender.Send(new UpdateItemCommand(targeItem));
+                                        // Em muitos assets, ItemId carrega o "valor em bits" requerido
+                                        int bitsToRemove = (int)res.ItemId;
+                                        client.Tamer.Inventory.RemoveBits(bitsToRemove);
+
+                                        // Mantém consistente com outros pontos do código (envia id e valor atual)
+                                        await _sender.Send(new UpdateItemListBitsCommand(
+                                            client.Tamer.Inventory.Id,
+                                            client.Tamer.Inventory.Bits));
                                     }
-                                }
-                                break;
+                                    break;
+
+                                case NpcResourceTypeEnum.Item:
+                                    {
+                                        int itemId = (int)res.ItemId;
+                                        var targetItem = client.Tamer.Inventory.FindItemById(itemId);
+
+                                        if (targetItem != null)
+                                        {
+                                            client.Tamer.Inventory.RemoveOrReduceItem(targetItem, 1);
+                                            // Se o item saiu completamente, o UpdateItemCommand pode falhar;
+                                            // mas mantemos para refletir a remoção (é o padrão do projeto).
+                                            await _sender.Send(new UpdateItemCommand(targetItem));
+                                        }
+                                    }
+                                    break;
+
+                                default:
+                                    // Tipos não usados / não suportados — ignora
+                                    break;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.Error(ex, "Failed to process portal resource payment for portal {PortalId}.", portal.Id);
                         }
                     }
                 }
-
-                var mapClient = _mapServer.FindClientByTamerId(client.TamerId);
-
-                if (mapClient == null)
+                else
                 {
-                    var tamerMap = _dungeonServer.Maps.First(x => x.Clients.Exists(y => y.TamerId == client.TamerId));
+                    _logger.Warning("Portal index {Index} out of range for NPC portal assets (PortalId={PortalId}, NpcId={NpcId}).",
+                        portal.PortalIndex, portal.Id, portal.NpcId);
+                }
+            }
 
-                    _logger.Verbose($"Verifying if is Royal Base Map: {tamerMap.IsRoyalBase.ToString()}");
+            // --------------------------------------------------------------------
+            // Verifica se o cliente está no MapServer ou num DungeonsServer
+            // (Royal Base tem regras locais para portais entre pisos)
+            // --------------------------------------------------------------------
+            var mapClient = _mapServer.FindClientByTamerId(client.TamerId);
 
-                    if (!portal.IsLocal && tamerMap.IsRoyalBase)
+            if (mapClient == null)
+            {
+                var tamerMap = _dungeonServer.Maps
+                    .FirstOrDefault(x => x.Clients.Exists(y => y.TamerId == client.TamerId));
+
+                _logger.Verbose("Verifying if is Royal Base Map: {IsRoyalBase}",
+                    tamerMap?.IsRoyalBase.ToString() ?? "null");
+
+                // Regras específicas Royal Base (quando portal é inter-mapa mas mapa é especial)
+                if (!portal.IsLocal && tamerMap != null && tamerMap.IsRoyalBase)
+                {
+                    int currentMapId = tamerMap.MapId;
+
+                    _logger.Verbose(
+                        "Going MapID: {DestMapId} and is allowed to enter floor 3 {Allowed}",
+                        portal.DestinationMapId,
+                        (tamerMap?.RoyalBaseMap?.AllowUsingPortalFromFloorTwoToFloorThree == false
+                         || tamerMap?.RoyalBaseMap?.AllowUsingPortalFromFloorTwoToFloorThree == null).ToString());
+
+                    // Piso 1 -> 2 (1702) bloqueado
+                    if ((tamerMap?.RoyalBaseMap?.AllowUsingPortalFromFloorOneToFloorTwo == false
+                         || tamerMap?.RoyalBaseMap?.AllowUsingPortalFromFloorOneToFloorTwo == null)
+                        && portal.DestinationMapId == 1702)
                     {
-                        int MapId = tamerMap.MapId;
-                        _logger.Verbose($"Going MapID: {portal.DestinationMapId} and is allowed to enter floor 3 {(tamerMap?.RoyalBaseMap?.AllowUsingPortalFromFloorTwoToFloorThree == false || tamerMap?.RoyalBaseMap?.AllowUsingPortalFromFloorTwoToFloorThree == null).ToString()}");
-                        
-                        if ((tamerMap?.RoyalBaseMap?.AllowUsingPortalFromFloorOneToFloorTwo == false || tamerMap?.RoyalBaseMap?.AllowUsingPortalFromFloorOneToFloorTwo == null) && portal.DestinationMapId == 1702)
-                        {
-                            int LocationX = 32000;
-                            int LocationY = 32000;
+                        const int LocationX = 32000;
+                        const int LocationY = 32000;
 
-                            client.Tamer.NewLocation(MapId, LocationX, LocationY);
-                            await _sender.Send(new UpdateCharacterLocationCommand(client.Tamer.Location));
+                        client.Tamer.NewLocation(currentMapId, LocationX, LocationY);
+                        await _sender.Send(new UpdateCharacterLocationCommand(client.Tamer.Location));
 
-                            client.Tamer.Partner.NewLocation(MapId, LocationX, LocationY);
-                            await _sender.Send(new UpdateDigimonLocationCommand(client.Tamer.Partner.Location));
+                        client.Tamer.Partner.NewLocation(currentMapId, LocationX, LocationY);
+                        await _sender.Send(new UpdateDigimonLocationCommand(client.Tamer.Partner.Location));
 
-                            client.Send(new LocalMapSwapPacket(client.Tamer.GeneralHandler, client.Tamer.Partner.GeneralHandler,
-                                 LocationX, LocationY, LocationX, LocationY));
+                        client.Send(new LocalMapSwapPacket(
+                            client.Tamer.GeneralHandler,
+                            client.Tamer.Partner.GeneralHandler,
+                            LocationX, LocationY, LocationX, LocationY));
 
-                            return;
-                        }
-
-                        if ((tamerMap?.RoyalBaseMap?.AllowUsingPortalFromFloorTwoToFloorThree == false || tamerMap?.RoyalBaseMap?.AllowUsingPortalFromFloorTwoToFloorThree == null) && portal.DestinationMapId == 1703)
-                        {
-                            int LocationX = 34814;
-                            int LocationY = 30686;
-
-                            client.Tamer.NewLocation(MapId, LocationX, LocationY);
-                            await _sender.Send(new UpdateCharacterLocationCommand(client.Tamer.Location));
-
-                            client.Tamer.Partner.NewLocation(MapId, LocationX, LocationY);
-                            await _sender.Send(new UpdateDigimonLocationCommand(client.Tamer.Partner.Location));
-
-                            client.Send(new LocalMapSwapPacket(client.Tamer.GeneralHandler, client.Tamer.Partner.GeneralHandler,
-                                 LocationX, LocationY, LocationX, LocationY));
-
-                            return;
-                        }
+                        return;
                     }
 
+                    // Piso 2 -> 3 (1703) bloqueado
+                    if ((tamerMap?.RoyalBaseMap?.AllowUsingPortalFromFloorTwoToFloorThree == false
+                         || tamerMap?.RoyalBaseMap?.AllowUsingPortalFromFloorTwoToFloorThree == null)
+                        && portal.DestinationMapId == 1703)
+                    {
+                        const int LocationX = 34814;
+                        const int LocationY = 30686;
+
+                        client.Tamer.NewLocation(currentMapId, LocationX, LocationY);
+                        await _sender.Send(new UpdateCharacterLocationCommand(client.Tamer.Location));
+
+                        client.Tamer.Partner.NewLocation(currentMapId, LocationX, LocationY);
+                        await _sender.Send(new UpdateDigimonLocationCommand(client.Tamer.Partner.Location));
+
+                        client.Send(new LocalMapSwapPacket(
+                            client.Tamer.GeneralHandler,
+                            client.Tamer.Partner.GeneralHandler,
+                            LocationX, LocationY, LocationX, LocationY));
+
+                        return;
+                    }
                 }
+            }
 
-                if (portal.IsLocal)
-                {
-                    client.Tamer.NewLocation(portal.DestinationMapId, portal.DestinationX, portal.DestinationY);
-                    await _sender.Send(new UpdateCharacterLocationCommand(client.Tamer.Location));
-
-                    client.Tamer.Partner.NewLocation(portal.DestinationMapId, portal.DestinationX, portal.DestinationY);
-                    await _sender.Send(new UpdateDigimonLocationCommand(client.Tamer.Partner.Location));
-
-                    client.Send(new LocalMapSwapPacket(client.Tamer.GeneralHandler, client.Tamer.Partner.GeneralHandler,
-                         portal.DestinationX, portal.DestinationY, portal.DestinationX, portal.DestinationY));
-
-                    return;
-                }
-
-                _mapServer.RemoveClient(client);
-
+            // --------------------------------------------------------------------
+            // Teleporte local (mesmo servidor / mapa “local”)
+            // --------------------------------------------------------------------
+            if (portal.IsLocal)
+            {
                 client.Tamer.NewLocation(portal.DestinationMapId, portal.DestinationX, portal.DestinationY);
                 await _sender.Send(new UpdateCharacterLocationCommand(client.Tamer.Location));
 
                 client.Tamer.Partner.NewLocation(portal.DestinationMapId, portal.DestinationX, portal.DestinationY);
                 await _sender.Send(new UpdateDigimonLocationCommand(client.Tamer.Partner.Location));
 
-                client.Tamer.UpdateState(CharacterStateEnum.Loading);
-                await _sender.Send(new UpdateCharacterStateCommand(client.TamerId, CharacterStateEnum.Loading));
+                client.Send(new LocalMapSwapPacket(
+                    client.Tamer.GeneralHandler, client.Tamer.Partner.GeneralHandler,
+                    portal.DestinationX, portal.DestinationY,
+                    portal.DestinationX, portal.DestinationY));
 
-                client.Tamer.SetCurrentChannel(0);
-
-                client.SetGameQuit(false);
-
-                client.Send(new MapSwapPacket(_configuration[GamerServerPublic], _configuration[GameServerPort],
-                        client.Tamer.Location.MapId, client.Tamer.Location.X, client.Tamer.Location.Y));
-
-                var party = _partyManager.FindParty(client.TamerId);
-
-                if (party != null)
-                {
-                    party.UpdateMember(party[client.TamerId], client.Tamer);
-
-                    foreach (var target in party.Members.Values)
-                    {
-                        var targetClient = _mapServer.FindClientByTamerId(target.Id);
-
-                        if (targetClient == null) targetClient = _dungeonServer.FindClientByTamerId(target.Id);
-
-                        if (targetClient == null) continue;
-
-                        if (target.Id != client.Tamer.Id) targetClient.Send(new PartyMemberWarpGatePacket(party[client.TamerId]).Serialize());
-                    }
-
-                    client.Send(new PartyMemberListPacket(party, client.TamerId, (byte)(party.Members.Count - 1)).Serialize());
-                }
-
+                return;
             }
 
-            //client.Send(new SendHandler(client.Tamer.GeneralHandler));
+            // --------------------------------------------------------------------
+            // Teleporte entre mapas (MapSwap para endereço/porta do GameServer)
+            // --------------------------------------------------------------------
+            _mapServer.RemoveClient(client);
 
+            client.Tamer.NewLocation(portal.DestinationMapId, portal.DestinationX, portal.DestinationY);
+            await _sender.Send(new UpdateCharacterLocationCommand(client.Tamer.Location));
+
+            client.Tamer.Partner.NewLocation(portal.DestinationMapId, portal.DestinationX, portal.DestinationY);
+            await _sender.Send(new UpdateDigimonLocationCommand(client.Tamer.Partner.Location));
+
+            client.Tamer.UpdateState(CharacterStateEnum.Loading);
+            await _sender.Send(new UpdateCharacterStateCommand(client.TamerId, CharacterStateEnum.Loading));
+
+            client.Tamer.SetCurrentChannel(0);
+            client.SetGameQuit(false);
+
+            client.Send(new MapSwapPacket(
+                _configuration[GamerServerPublic],
+                _configuration[GameServerPort],
+                client.Tamer.Location.MapId,
+                client.Tamer.Location.X,
+                client.Tamer.Location.Y));
+
+            // --------------------------------------------------------------------
+            // Atualiza party e notifica membros
+            // --------------------------------------------------------------------
+            var partyObj = _partyManager.FindParty(client.TamerId);
+
+            if (partyObj != null)
+            {
+                partyObj.UpdateMember(partyObj[client.TamerId], client.Tamer);
+
+                foreach (var target in partyObj.Members.Values)
+                {
+                    var targetClient = _mapServer.FindClientByTamerId(target.Id)
+                                     ?? _dungeonServer.FindClientByTamerId(target.Id);
+
+                    if (targetClient == null) continue;
+                    if (target.Id != client.Tamer.Id)
+                        targetClient.Send(new PartyMemberWarpGatePacket(partyObj[client.TamerId]).Serialize());
+                }
+
+                client.Send(new PartyMemberListPacket(
+                    partyObj,
+                    client.TamerId,
+                    (byte)(partyObj.Members.Count - 1)).Serialize());
+            }
+
+            // client.Send(new SendHandler(client.Tamer.GeneralHandler));
         }
     }
 }

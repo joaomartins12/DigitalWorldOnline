@@ -62,9 +62,8 @@ namespace DigitalWorldOnline.GameHost
                                 mob.TamersViewing.Add(nearTamer);
 
                                 var targetClient = map.Clients.FirstOrDefault(x => x.TamerId == nearTamer);
-
-                                targetClient?.Send(new LoadMobsPacket(mob));
-                                targetClient?.Send(new LoadBuffsPacket(mob));
+                                targetClient?.Send(new LoadMobsPacket(mob));        // OK: MobConfigModel
+                                targetClient?.Send(new LoadBuffsPacket(mob));       // OK: overload existente
                             }
                         });
                     }
@@ -76,8 +75,7 @@ namespace DigitalWorldOnline.GameHost
                         if (mob.TamersViewing.Contains(farTamer))
                         {
                             var targetClient = map.Clients.FirstOrDefault(x => x.TamerId == farTamer);
-
-                            mob.TamersViewing.Remove(farTamer);
+                            mob.TamersViewing.RemoveAll(id => id == farTamer);  // remove duplicados
                             targetClient?.Send(new UnloadMobsPacket(mob));
                         }
                     });
@@ -110,10 +108,14 @@ namespace DigitalWorldOnline.GameHost
                     {
                         nearTamers.ForEach(nearTamer =>
                         {
+                            if (!mob.TamersViewing.Contains(nearTamer))
+                            {
                                 mob.TamersViewing.Add(nearTamer);
 
                                 var targetClient = map.Clients.FirstOrDefault(x => x.TamerId == nearTamer);
-                                targetClient?.Send(new LoadMobsPacket(mob, true));
+                                targetClient?.Send(new LoadMobsPacket(mob, true));   // OK: SummonMobModel + flag
+                                                                                     // NÃO chames LoadBuffsPacket aqui a menos que exista overload para SummonMobModel
+                            }
                         });
                     }
 
@@ -124,8 +126,7 @@ namespace DigitalWorldOnline.GameHost
                         if (mob.TamersViewing.Contains(farTamer))
                         {
                             var targetClient = map.Clients.FirstOrDefault(x => x.TamerId == farTamer);
-
-                            mob.TamersViewing.Remove(farTamer);
+                            mob.TamersViewing.RemoveAll(id => id == farTamer);
                             targetClient?.Send(new UnloadMobsPacket(mob));
                         }
                     });
@@ -326,7 +327,7 @@ namespace DigitalWorldOnline.GameHost
                             break;
                         }
 
-                        if (!mob.Dead && ((mob.TargetTamer == null || mob.TargetTamer.Hidden))) //Anti-kite
+                        if (!mob.Dead && ((mob.TargetTamer == null || mob.TargetTamer.Hidden))) // Anti-kite
                         {
                             mob.GiveUp();
                             break;
@@ -344,17 +345,22 @@ namespace DigitalWorldOnline.GameHost
                             break;
                         }
 
-                        Random random = new Random();
-
-                        var targetSkill = skillList[random.Next(0, skillList.Count)];
+                        // escolha de skill com RNG partilhado
+                        var targetSkill = skillList[
+#if NET6_0_OR_GREATER
+                            Rng.Next(0, skillList.Count)
+#else
+        Rng.Value!.Next(0, skillList.Count)
+#endif
+                        ];
 
                         if (!mob.Dead && !mob.Chasing && mob.TargetAlive)
                         {
                             var diff = UtilitiesFunctions.CalculateDistance(
-                               mob.CurrentLocation.X,
-                               mob.Target.Location.X,
-                               mob.CurrentLocation.Y,
-                               mob.Target.Location.Y);
+                                mob.CurrentLocation.X,
+                                mob.Target.Location.X,
+                                mob.CurrentLocation.Y,
+                                mob.Target.Location.Y);
 
                             if (diff <= 1900)
                             {
@@ -363,12 +369,9 @@ namespace DigitalWorldOnline.GameHost
 
                                 map.SkillTarget(mob, targetSkill, _assets.NpcColiseum);
 
-
-
                                 if (mob.Target != null)
                                 {
                                     mob.UpdateCurrentAction(MobActionEnum.Wait);
-
                                     mob.SetNextAction();
                                 }
                             }
@@ -382,17 +385,15 @@ namespace DigitalWorldOnline.GameHost
                         {
                             foreach (var targetTamer in mob.TargetTamers)
                             {
-
                                 targetTamer.StopBattle();
-                                map.BroadcastForTamerViewsAndSelf(targetTamer.Id, new SetCombatOffPacket(targetTamer.Partner.GeneralHandler).Serialize());
-
+                                map.BroadcastForTamerViewsAndSelf(
+                                    targetTamer.Id,
+                                    new SetCombatOffPacket(targetTamer.Partner.GeneralHandler).Serialize());
                             }
-
                             break;
                         }
                     }
                     break;
-
             }
         }
 
@@ -816,10 +817,9 @@ namespace DigitalWorldOnline.GameHost
 
                     if (tamerResult.LevelGain > 0 || partnerResult.LevelGain > 0)
                     {
-                        targetClient.Send(new UpdateStatusPacket(targetClient.Tamer));
-
-                        map.BroadcastForTamerViewsAndSelf(targetClient.TamerId,
-                            new UpdateMovementSpeedPacket(targetClient.Tamer).Serialize());
+                        partyMemberClient.Send(new UpdateStatusPacket(partyMemberClient.Tamer));
+                        map.BroadcastForTamerViewsAndSelf(partyMemberClient.TamerId,
+                            new UpdateMovementSpeedPacket(partyMemberClient.Tamer).Serialize());
                     }
 
                     _sender.Send(new UpdateCharacterExperienceCommand(partyMemberClient.Tamer));
@@ -872,10 +872,9 @@ namespace DigitalWorldOnline.GameHost
 
                     if (tamerResult.LevelGain > 0 || partnerResult.LevelGain > 0)
                     {
-                        targetClient.Send(new UpdateStatusPacket(targetClient.Tamer));
-
-                        map.BroadcastForTamerViewsAndSelf(targetClient.TamerId,
-                            new UpdateMovementSpeedPacket(targetClient.Tamer).Serialize());
+                        partyMemberClient.Send(new UpdateStatusPacket(partyMemberClient.Tamer));
+                        map.BroadcastForTamerViewsAndSelf(partyMemberClient.TamerId,
+                            new UpdateMovementSpeedPacket(partyMemberClient.Tamer).Serialize());
                     }
 
                     _sender.Send(new UpdateCharacterExperienceCommand(partyMemberClient.Tamer));
@@ -1356,7 +1355,7 @@ namespace DigitalWorldOnline.GameHost
                             map.AttackNearbyTamer(mob, mob.TamersViewing, _assets.NpcColiseum);
                         }
 
-                        CheckIsDead(map, mob);
+                        _ = CheckIsDead(map, mob);
                     }
                     break;
 
@@ -1365,7 +1364,7 @@ namespace DigitalWorldOnline.GameHost
                         map.BroadcastForTargetTamers(mob.TamersViewing, new SyncConditionPacket(mob.GeneralHandler, ConditionEnum.Default).Serialize());
                         mob.Move();
                         map.BroadcastForTargetTamers(mob.TamersViewing, new MobWalkPacket(mob).Serialize());
-                        CheckIsDead(map, mob);
+                        _ = CheckIsDead(map, mob);
                     }
                     break;
 
@@ -1454,13 +1453,13 @@ namespace DigitalWorldOnline.GameHost
                             }
                         }
 
-                        CheckIsDead(map, mob);
+                        _ = CheckIsDead(map, mob);
                     }
                     break;
 
                 case MobActionEnum.UseAttackSkill:
                     {
-                        if (!mob.Dead && ((mob.TargetTamer == null || mob.TargetTamer.Hidden))) //Anti-kite
+                        if (!mob.Dead && ((mob.TargetTamer == null || mob.TargetTamer.Hidden))) // Anti-kite
                         {
                             mob.GiveUp();
                             break;
@@ -1478,17 +1477,22 @@ namespace DigitalWorldOnline.GameHost
                             break;
                         }
 
-                        Random random = new Random();
-
-                        var targetSkill = skillList[random.Next(0, skillList.Count)];
+                        // escolha de skill com RNG partilhado (sem criar Random local)
+                        var targetSkill = skillList[
+#if NET6_0_OR_GREATER
+                            Rng.Next(0, skillList.Count)
+#else
+        Rng.Value!.Next(0, skillList.Count)
+#endif
+                        ];
 
                         if (!mob.Dead && !mob.Chasing && mob.TargetAlive)
                         {
                             var diff = UtilitiesFunctions.CalculateDistance(
-                               mob.CurrentLocation.X,
-                               mob.Target.Location.X,
-                               mob.CurrentLocation.Y,
-                               mob.Target.Location.Y);
+                                mob.CurrentLocation.X,
+                                mob.Target.Location.X,
+                                mob.CurrentLocation.Y,
+                                mob.Target.Location.Y);
 
                             if (diff <= 1900)
                             {
@@ -1497,12 +1501,9 @@ namespace DigitalWorldOnline.GameHost
 
                                 map.SkillTarget(mob, targetSkill);
 
-
-
                                 if (mob.Target != null)
                                 {
                                     mob.UpdateCurrentAction(MobActionEnum.Wait);
-
                                     mob.SetNextAction();
                                 }
                             }
@@ -1516,22 +1517,21 @@ namespace DigitalWorldOnline.GameHost
                         {
                             foreach (var targetTamer in mob.TargetTamers)
                             {
-
                                 targetTamer.StopBattle(true);
-                                map.BroadcastForTamerViewsAndSelf(targetTamer.Id, new SetCombatOffPacket(targetTamer.Partner.GeneralHandler).Serialize());
-
+                                map.BroadcastForTamerViewsAndSelf(
+                                    targetTamer.Id,
+                                    new SetCombatOffPacket(targetTamer.Partner.GeneralHandler).Serialize());
                             }
-
                             break;
                         }
 
-                        CheckIsDead(map, mob);
+                        _ = CheckIsDead(map, mob);
                     }
                     break;
             }
         }
 
-        private async void CheckIsDead(GameMap map, MobConfigModel mob)
+        private async Task CheckIsDead(GameMap map, MobConfigModel mob)
         {
             if (mob.Dead)
             {
@@ -1569,7 +1569,7 @@ namespace DigitalWorldOnline.GameHost
             }
         }
 
-        private async void CheckIsDead(GameMap map, SummonMobModel mob)
+        private async Task CheckIsDead(GameMap map, SummonMobModel mob)
         {
             if (mob.Dead)
             {
@@ -1864,9 +1864,13 @@ namespace DigitalWorldOnline.GameHost
             if (!itemsReward.Any()) return;
 
             Random random = new Random();
-            foreach (var itemDrop in itemsReward.ToList()) {
-                double randomValue = random.NextDouble() * 100;
-                if (randomValue <= itemDrop.Chance)
+            // NÃO criamos Random local; usar sempre RandomDouble() (0..1)
+            foreach (var itemDrop in itemsReward.ToList())
+            {
+                // normaliza chance caso venha em percentagem (ex.: 35 => 0.35)
+                double chance = itemDrop.Chance > 1.0 ? itemDrop.Chance / 100.0 : itemDrop.Chance;
+
+                if (chance >= UtilitiesFunctions.RandomDouble())
                 {
                     if (targetClient.Tamer.HasAura && targetClient.Tamer.Aura.ItemInfo.Section == 2100)
                     {
@@ -1874,7 +1878,7 @@ namespace DigitalWorldOnline.GameHost
                         newItem.SetItemInfo(_assets.ItemInfo.FirstOrDefault(x => x.ItemId == itemDrop.ItemId));
 
                         if (newItem.ItemInfo == null) continue;
-                        
+
                         newItem.ItemId = itemDrop.ItemId;
                         newItem.Amount = UtilitiesFunctions.RandomInt(itemDrop.MinAmount, itemDrop.MaxAmount);
 
@@ -1918,6 +1922,7 @@ namespace DigitalWorldOnline.GameHost
                         map.AddMapDrop(drop);
                     }
 
+                    // evita que o mesmo drop volte a ser sorteado neste ciclo
                     itemsReward.RemoveAll(x => x.Id == itemDrop.Id);
                 }
             }

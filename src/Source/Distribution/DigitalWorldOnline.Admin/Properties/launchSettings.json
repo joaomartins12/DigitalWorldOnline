@@ -5,7 +5,7 @@
       "launchBrowser": true,
         "environmentVariables": {
             "ASPNETCORE_ENVIRONMENT": "Development",
-            "ASPNETCORE_URLS": "http://26.253.222.118:41001;https://26.253.222.118:5002"
+            "ASPNETCORE_URLS": "http://26.249.80.49:41001;https://26.249.80.49:5002"
         }
     },
     "MudblazorDemo.CRUD": {
@@ -15,7 +15,7 @@
             "ASPNETCORE_ENVIRONMENT": "Development"
         },
         "dotnetRunMessages": true,
-        "applicationUrl": "http://26.253.222.118:41001;http://26.253.222.118:5002"
+        "applicationUrl": "http://26.249.80.49:41001;http://26.249.80.49:5002"
     }
   },
   "iisSettings": {

@@ -4,7 +4,6 @@ using DigitalWorldOnline.Commons.Enums.ClientEnums;
 using DigitalWorldOnline.Commons.Enums.PacketProcessor;
 using DigitalWorldOnline.Commons.Interfaces;
 using DigitalWorldOnline.Commons.Packets.Items;
-
 using MediatR;
 using Serilog;
 
@@ -30,47 +29,49 @@ namespace DigitalWorldOnline.Game.PacketProcessors
             var packet = new GamePacketReader(packetData);
 
             var slot = packet.ReadShort();
-            var posx = packet.ReadInt();
-            var posy = packet.ReadInt();
+            var posx = packet.ReadInt();   // atualmente não usado (drop desativado)
+            var posy = packet.ReadInt();   // atualmente não usado (drop desativado)
             var amount = packet.ReadShort();
 
+            // validação do item no slot
             var targetItem = client.Tamer.Inventory.FindItemBySlot(slot);
-
-            if (targetItem?.ItemId > 0)
+            if (targetItem == null || targetItem.ItemId <= 0)
             {
-                //if (targetItem.ItemInfo?.ItemBoundType == 0)
-                //{
-                //    var temp = (ItemModel)targetItem.Clone();
-                //
-                //    if (client.Tamer.Inventory.RemoveOrReduceItems(targetItem.GetList()))
-                //    {
-                //        var drop = _dropManager.CreateItemDrop(
-                //            client.TamerId,
-                //            client.Tamer.GeneralHandler,
-                //            temp.ItemId,
-                //            temp.Amount,
-                //            temp.Amount,
-                //            client.Tamer.Location.MapId,
-                //            client.Tamer.Location.X,
-                //            client.Tamer.Location.Y,
-                //            true
-                //        );
-                //
-                //        _mapServer.AddMapDrop(drop);
-                //
-                //        _logger.Verbose($"Tamer {client.TamerId} throw away {targetItem.ItemId} x{targetItem.Amount} at {client.Tamer.Location.MapId}.");
-                //    }
-                //}
-                //else
-                //{
+                _logger.Warning("ItemRemove: invalid slot {Slot} for tamer {TamerId}.", slot, client.TamerId);
+                client.Send(new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory));
+                return;
+            }
 
-                _logger.Verbose($"Character {client.TamerId} deleted {targetItem.ItemId} x{amount} at {client.Tamer.Location.MapId} x{posx} y{posy}.");
-                
+            // normaliza amount
+            if (amount <= 0)
+            {
+                amount = 1;
+            }
+            if (amount > targetItem.Amount)
+            {
+                amount = (short)targetItem.Amount;
+            }
+
+            try
+            {
+                _logger.Verbose(
+                    "ItemRemove: tamer {TamerId} deleted item {ItemId} x{Amount} at map {MapId} (x:{X}, y:{Y}) [slot {Slot}].",
+                    client.TamerId, targetItem.ItemId, amount, client.Tamer.Location.MapId, posx, posy, slot
+                );
+
+                // Apenas deletar do inventário (drop no chão permanece desativado)
                 client.Tamer.Inventory.RemoveOrReduceItem(targetItem, amount, slot);
-                //}
-                
+
+                // persiste alteração desse item/slot
                 await _sender.Send(new UpdateItemCommand(targetItem));
 
+                // feedback
+                client.Send(new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory));
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "ItemRemove: exception removing item {ItemId} for tamer {TamerId} (slot {Slot}).", targetItem.ItemId, client.TamerId, slot);
+                // mesmo em erro, atualiza a UI do cliente para evitar inconsistências locais
                 client.Send(new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory));
             }
         }

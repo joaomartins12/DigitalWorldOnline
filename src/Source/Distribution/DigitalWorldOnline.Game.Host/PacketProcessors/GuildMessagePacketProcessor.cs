@@ -38,24 +38,29 @@ namespace DigitalWorldOnline.Game.PacketProcessors
             var packet = new GamePacketReader(packetData);
             var message = packet.ReadString();
 
-            if (client.Tamer.Guild != null)
+            var guild = client.Tamer.Guild;
+            if (guild != null)
             {
+                // Serializa uma vez só
+                var payload = new GuildMessagePacket(client.Tamer.Name, message).Serialize();
 
-                foreach (var memberId in client.Tamer.Guild.GetGuildMembersIdList())
+                foreach (var memberId in guild.GetGuildMembersIdList())
                 {
-                    var targetPlayer = _mapServer.FindClientByTamerId(memberId);
-                    if (targetPlayer == null) targetPlayer = _dungeonServer.FindClientByTamerId(memberId);
-                    targetPlayer.Send(new GuildMessagePacket(client.Tamer.Name, message).Serialize());
+                    var targetPlayer = _mapServer.FindClientByTamerId(memberId)
+                                       ?? _dungeonServer.FindClientByTamerId(memberId);
+
+                    // Se o membro estiver offline, apenas ignora
+                    targetPlayer?.Send(payload);
                 }
 
-                _logger.Verbose($"Character {client.TamerId} sent chat to guild {client.Tamer.Guild.Id} with message {message}.");
-                await _mapServer.CallDiscord(message, client, "1eff00", client.Tamer.Guild.Name);
+                _logger.Verbose($"Character {client.TamerId} sent chat to guild {guild.Id} with message {message}.");
+                await _mapServer.CallDiscord(message, client, "1eff00", guild.Name);
 
                 await _sender.Send(new CreateChatMessageCommand(ChatMessageModel.Create(client.TamerId, message)));
             }
             else
             {
-                client.Send(new SystemMessagePacket($"You need to be in a guild to send guild messages."));
+                client.Send(new SystemMessagePacket("You need to be in a guild to send guild messages."));
                 _logger.Warning($"Character {client.TamerId} sent guild message but was not in a guild.");
             }
         }

@@ -8,86 +8,104 @@ namespace DigitalWorldOnline.GameHost
     {
         private void DropsOperation(GameMap map)
         {
+            // Se não há jogadores conectados, não há nada para fazer
             if (!map.ConnectedTamers.Any())
                 return;
 
-            var stopwatch = new Stopwatch();
-            stopwatch.Start();
+            var sw = new Stopwatch();
+            sw.Start();
 
+            // 1) Aplicar pendências de adição (thread-safe)
             lock (map.DropsLock)
             {
                 if (map.DropsToAdd.Count > 0)
                 {
                     foreach (var drop in map.DropsToAdd)
                         map.AddDrop(drop);
-                }
 
-                map.DropsToAdd.Clear();
+                    map.DropsToAdd.Clear();
+                }
             }
 
-            foreach (var drop in map.Drops)
+            // 2) Snapshot da lista de drops para iterar sem segurar lock
+            List<Drop> snapshot;
+            lock (map.DropsLock)
+            {
+                snapshot = map.Drops.ToList();
+            }
+            var snapshotCount = snapshot.Count;
+
+            // 3) Processar cada drop (mostrar/ocultar e expiração)
+            foreach (var drop in snapshot)
             {
                 var nearTamers = map.NearestTamers(drop);
                 var farTamers = map.FarawayTamers(drop);
 
                 ShowAndHideDrop(map, drop, nearTamers, farTamers);
-
                 CheckExpiredDrop(map, drop);
+                // Se usar "lost drop" (sem dono após período), habilite:
+                // CheckLostDrop(map, drop);
             }
 
+            // 4) Aplicar pendências de remoção (thread-safe)
             lock (map.DropsLock)
             {
-                foreach (var drop in map.DropsToRemove)
-                    map.RemoveDrop(drop);
+                if (map.DropsToRemove.Count > 0)
+                {
+                    foreach (var drop in map.DropsToRemove)
+                        map.RemoveDrop(drop);
 
-                map.DropsToRemove.Clear();
+                    map.DropsToRemove.Clear();
+                }
             }
 
-            stopwatch.Stop();
-
-            var totalTime = stopwatch.Elapsed.TotalMilliseconds;
-            if (totalTime >= 1000)
-                Console.WriteLine($"DropsOperation ({map.Drops.Count}): {totalTime}.");
+            // 5) Métrica
+            sw.Stop();
+            var totalMs = sw.Elapsed.TotalMilliseconds;
+            if (totalMs >= 1000)
+                Console.WriteLine($"DropsOperation ({snapshotCount}) took {totalMs:0.0}ms.");
         }
 
         private void ShowAndHideDrop(GameMap map, Drop drop, List<long> nearTamers, List<long> farTamers)
         {
-            foreach (var targetTamer in nearTamers)
+            // mostrar para quem entrou na área
+            foreach (var tamerId in nearTamers)
             {
-                if (!map.ViewingDrop(drop.Id, targetTamer))
+                if (!map.ViewingDrop(drop.Id, tamerId))
                 {
-                    var targetClient = map.Clients.FirstOrDefault(x => x.TamerId == targetTamer);
+                    var client = map.Clients.FirstOrDefault(c => c.TamerId == tamerId);
 
-                    map.ShowDrop(drop.Id, targetTamer);
-                    targetClient?.Send(new LoadDropsPacket(drop));
+                    map.ShowDrop(drop.Id, tamerId);
+                    client?.Send(new LoadDropsPacket(drop));
                 }
             }
 
-            foreach (var farTamer in farTamers)
+            // ocultar de quem saiu da área
+            foreach (var tamerId in farTamers)
             {
-                if (map.ViewingDrop(drop.Id, farTamer) && !nearTamers.Contains(farTamer))
+                if (map.ViewingDrop(drop.Id, tamerId) && !nearTamers.Contains(tamerId))
                 {
-                    var targetClient = map.Clients.FirstOrDefault(x => x.TamerId == farTamer);
+                    var client = map.Clients.FirstOrDefault(c => c.TamerId == tamerId);
 
-                    map.HideDrop(drop.Id, farTamer);
-                    targetClient?.Send(new UnloadDropsPacket(drop));
+                    map.HideDrop(drop.Id, tamerId);
+                    client?.Send(new UnloadDropsPacket(drop));
                 }
             }
         }
 
         private void CheckLostDrop(GameMap map, Drop drop)
         {
+            // Se o drop não tem dono e ainda não foi marcado como "perdido", reatribui visibilidade
             if (!drop.Lost && !drop.Thrown && drop.NoOwner)
             {
-                var dropViews = new List<long>();
-                dropViews.AddRange(map.GetDropViews(drop.Id));
+                var dropViews = new List<long>(map.GetDropViews(drop.Id));
 
-                foreach (var tamer in dropViews)
+                foreach (var tamerId in dropViews)
                 {
-                    var targetClient = map.Clients.FirstOrDefault(x => x.TamerId == tamer);
+                    var client = map.Clients.FirstOrDefault(x => x.TamerId == tamerId);
 
-                    targetClient?.Send(new UnloadDropsPacket(drop));
-                    targetClient?.Send(new LoadDropsPacket(drop, targetClient.Tamer.GeneralHandler));
+                    client?.Send(new UnloadDropsPacket(drop));
+                    client?.Send(new LoadDropsPacket(drop, client.Tamer.GeneralHandler));
                 }
 
                 drop.SetLost();
@@ -96,19 +114,29 @@ namespace DigitalWorldOnline.GameHost
 
         private void CheckExpiredDrop(GameMap map, Drop drop)
         {
-            if (drop.Expired && !map.DropsToRemove.Any(x => x.Id == drop.Id))
+            if (!drop.Expired)
+                return;
+
+            bool alreadyQueued;
+            lock (map.DropsLock)
             {
-                var dropViews = new List<long>();
-                dropViews.AddRange(map.GetDropViews(drop.Id));
+                alreadyQueued = map.DropsToRemove.Any(x => x.Id == drop.Id);
+            }
+            if (alreadyQueued)
+                return;
 
-                foreach (var tamer in dropViews)
-                {
-                    var targetClient = map.Clients.FirstOrDefault(x => x.TamerId == tamer);
+            var dropViews = new List<long>(map.GetDropViews(drop.Id));
 
-                    map.HideDrop(drop.Id, tamer);
-                    targetClient?.Send(new UnloadDropsPacket(drop));
-                }
+            foreach (var tamerId in dropViews)
+            {
+                var client = map.Clients.FirstOrDefault(x => x.TamerId == tamerId);
 
+                map.HideDrop(drop.Id, tamerId);
+                client?.Send(new UnloadDropsPacket(drop));
+            }
+
+            lock (map.DropsLock)
+            {
                 map.DropsToRemove.Add(drop);
             }
         }

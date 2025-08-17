@@ -1,4 +1,7 @@
-﻿using DigitalWorldOnline.Commons.Models.Character;
+﻿using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using DigitalWorldOnline.Commons.Models.Character;
 using DigitalWorldOnline.Commons.Models.Mechanics;
 
 namespace DigitalWorldOnline.Game.Managers
@@ -6,67 +9,71 @@ namespace DigitalWorldOnline.Game.Managers
     public class PartyManager
     {
         private int _partyId;
+        private readonly object _sync = new();
 
-        public List<GameParty> Parties { get; private set; }
-
-        public PartyManager()
+        private readonly List<GameParty> _parties = new();
+        public IReadOnlyList<GameParty> Parties
         {
-            Parties = new();
+            get { lock (_sync) return _parties.ToList(); }
         }
 
         public GameParty CreateParty(CharacterModel leader, CharacterModel member)
         {
-            _partyId++;
+            var id = Interlocked.Increment(ref _partyId);
+            var party = GameParty.Create(id, leader, member);
 
-            var party = GameParty.Create(_partyId, leader, member);
-            Parties.Add(party);
-            return party;
-        }
-
-        /*public GameParty? FindParty(long leaderOrMemberId)
-        {
-            var party = Parties.FirstOrDefault(x => x.Members.Values.Any(y => y.Id == leaderOrMemberId));
-            if (party != null && party.Members.Count == 1)
+            lock (_sync)
             {
-                RemoveParty(party.Id);
-                return null;
+                _parties.Add(party);
             }
 
             return party;
-        }*/
+        }
 
         public GameParty? FindParty(long leaderOrMemberId)
         {
-            return Parties.FirstOrDefault(x => x.Members.Values.Any(y => y.Id == leaderOrMemberId));
+            lock (_sync)
+            {
+                return _parties.FirstOrDefault(
+                    p => p.Members.Values.Any(m => m.Id == leaderOrMemberId)
+                );
+            }
         }
 
         public void RemovePartyIfLastMember(long partyId)
         {
-            var party = Parties.FirstOrDefault(p => p.Id == partyId);
-
-            if (party != null && party.Members.Count == 1)
-
+            lock (_sync)
             {
-                RemoveParty(partyId);
-            }
+                var party = _parties.FirstOrDefault(p => p.Id == partyId);
+                if (party == null) return;
 
+                // Usa <= 1 para também cobrir party “vazia” por algum motivo
+                if (party.Members.Count <= 1)
+                {
+                    _parties.RemoveAll(p => p.Id == partyId);
+                }
+            }
         }
 
         public bool IsMemberInParty(long leaderOrMemberId, long tamerId)
         {
-            var party = FindParty(leaderOrMemberId);
+            lock (_sync)
+            {
+                var party = _parties.FirstOrDefault(
+                    p => p.Members.Values.Any(m => m.Id == leaderOrMemberId)
+                );
+                if (party == null) return false;
 
-            if (party == null)
-
-                return false;
-
-            return party.Members.Values.Any(x => x.Id == tamerId);
+                return party.Members.Values.Any(x => x.Id == tamerId);
+            }
         }
 
-        public void RemoveParty(long partyId)
+        public bool RemoveParty(long partyId)
         {
-            Parties.RemoveAll(x => x.Id == partyId);
+            lock (_sync)
+            {
+                return _parties.RemoveAll(x => x.Id == partyId) > 0;
+            }
         }
-
     }
 }

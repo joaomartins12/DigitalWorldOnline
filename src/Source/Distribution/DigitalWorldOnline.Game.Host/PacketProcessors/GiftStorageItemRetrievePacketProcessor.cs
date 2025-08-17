@@ -1,4 +1,7 @@
-﻿using DigitalWorldOnline.Application;
+﻿using System;
+using System.Linq;
+
+using DigitalWorldOnline.Application;
 using DigitalWorldOnline.Application.Separar.Commands.Update;
 using DigitalWorldOnline.Commons.Entities;
 using DigitalWorldOnline.Commons.Enums;
@@ -10,6 +13,7 @@ using DigitalWorldOnline.Commons.Packets.GameServer;
 using DigitalWorldOnline.Commons.Packets.GameServer.Combat;
 using DigitalWorldOnline.Commons.Packets.Items;
 using DigitalWorldOnline.Commons.Utils;
+
 using MediatR;
 using Serilog;
 
@@ -26,19 +30,14 @@ namespace DigitalWorldOnline.Game.PacketProcessors
         {
             _logger = logger;
             _sender = sender;
-
         }
 
         public async Task Process(GameClient client, byte[] packetData)
         {
-            //_logger.Information($"Calling GiftStorageItemRetrieve Packet");
-
             var packet = new GamePacketReader(packetData);
 
             var withdrawType = packet.ReadShort();
             var itemSlot = packet.ReadShort();
-
-            //_logger.Information($"withdrawType: {withdrawType} | itemSlot: {itemSlot}");
 
             if (withdrawType == 1)
             {
@@ -46,14 +45,18 @@ namespace DigitalWorldOnline.Game.PacketProcessors
 
                 if (targetItem != null)
                 {
-
                     var newItem = new ItemModel();
                     newItem.SetItemId(targetItem.ItemId);
                     newItem.SetAmount(targetItem.Amount);
                     newItem.SetItemInfo(targetItem.ItemInfo);
 
-                    if (newItem.IsTemporary)
-                        newItem.SetRemainingTime((uint)newItem.ItemInfo.UsageTimeMinutes);
+                    // ✅ Itens temporários: ancora expiração a partir de agora
+                    if (newItem.IsTemporary && newItem.ItemInfo?.UsageTimeMinutes > 0)
+                    {
+                        var minutes = (uint)newItem.ItemInfo.UsageTimeMinutes;
+                        newItem.SetRemainingTime(minutes);
+                        TrySetExpireAtUtc(newItem, DateTime.UtcNow.AddMinutes(minutes));
+                    }
 
                     client.Tamer.Inventory.AddItem(newItem);
                     client.Tamer.GiftWarehouse.RemoveItem(targetItem, (short)itemSlot);
@@ -65,15 +68,13 @@ namespace DigitalWorldOnline.Game.PacketProcessors
                     await _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
                     await _sender.Send(new UpdateItemsCommand(client.Tamer.GiftWarehouse));
                 }
-
             }
             else
             {
-                var Items = client.Tamer.GiftWarehouse.Items.Where(x => x.ItemId > 0).ToList();
+                var items = client.Tamer.GiftWarehouse.Items.Where(x => x.ItemId > 0).ToList();
 
-                foreach (var targetItem in Items)
+                foreach (var targetItem in items)
                 {
-
                     if (targetItem != null)
                     {
                         var newItem = new ItemModel();
@@ -81,13 +82,16 @@ namespace DigitalWorldOnline.Game.PacketProcessors
                         newItem.SetAmount(targetItem.Amount);
                         newItem.SetItemInfo(targetItem.ItemInfo);
 
-                        if (newItem.IsTemporary)
-                            newItem.SetRemainingTime((uint)newItem.ItemInfo.UsageTimeMinutes);
+                        // ✅ Itens temporários: ancora expiração a partir de agora
+                        if (newItem.IsTemporary && newItem.ItemInfo?.UsageTimeMinutes > 0)
+                        {
+                            var minutes = (uint)newItem.ItemInfo.UsageTimeMinutes;
+                            newItem.SetRemainingTime(minutes);
+                            TrySetExpireAtUtc(newItem, DateTime.UtcNow.AddMinutes(minutes));
+                        }
 
                         client.Tamer.Inventory.AddItem(newItem);
                         client.Tamer.GiftWarehouse.RemoveItem(targetItem, (short)targetItem.Slot);
-
-
                     }
                 }
 
@@ -96,6 +100,27 @@ namespace DigitalWorldOnline.Game.PacketProcessors
 
                 await _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
                 await _sender.Send(new UpdateItemsCommand(client.Tamer.GiftWarehouse));
+            }
+        }
+
+        // Tenta setar a propriedade ExpireAtUtc no ItemModel, se existir (evita dependência rígida)
+        private static void TrySetExpireAtUtc(ItemModel item, DateTime expireAtUtc)
+        {
+            try
+            {
+                var prop = item.GetType().GetProperty("ExpireAtUtc");
+                if (prop != null && prop.CanWrite && prop.PropertyType == typeof(DateTime))
+                {
+                    prop.SetValue(item, expireAtUtc);
+                }
+                else if (prop != null && prop.CanWrite && prop.PropertyType == typeof(DateTime?))
+                {
+                    prop.SetValue(item, (DateTime?)expireAtUtc);
+                }
+            }
+            catch
+            {
+                // Silencioso de propósito: se não existir a propriedade, seguimos só com RemainingTime
             }
         }
     }

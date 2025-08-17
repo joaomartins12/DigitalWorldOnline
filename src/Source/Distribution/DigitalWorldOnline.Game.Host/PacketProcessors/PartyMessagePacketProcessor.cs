@@ -1,4 +1,7 @@
-﻿using DigitalWorldOnline.Application.Separar.Commands.Create;
+﻿using System;
+using System.Linq;
+using System.Threading.Tasks;
+using DigitalWorldOnline.Application.Separar.Commands.Create;
 using DigitalWorldOnline.Commons.Entities;
 using DigitalWorldOnline.Commons.Enums.PacketProcessor;
 using DigitalWorldOnline.Commons.Interfaces;
@@ -21,6 +24,9 @@ namespace DigitalWorldOnline.Game.PacketProcessors
         private readonly ILogger _logger;
         private readonly ISender _sender;
 
+        // limite razoável para chat (ajusta se tiveres um valor global)
+        private const int MaxMessageLength = 256;
+
         public PartyMessagePacketProcessor(
             PartyManager partyManager,
             MapServer mapServer,
@@ -31,34 +37,66 @@ namespace DigitalWorldOnline.Game.PacketProcessors
             _partyManager = partyManager;
             _mapServer = mapServer;
             _dungeonServer = dungeonsServer;
-            _logger = logger;
-            _logger = logger;
+            _logger = logger;            // <-- removida duplicação
             _sender = sender;
         }
 
         public async Task Process(GameClient client, byte[] packetData)
         {
-            var packet = new GamePacketReader(packetData);
-            var message = packet.ReadString();
-
-            var party = _partyManager.FindParty(client.TamerId);
-            if (party == null)
+            try
             {
-                client.Send(new SystemMessagePacket($"You need to be in a party to send party messages."));
-                _logger.Warning($"Character {client.TamerId} sent party message but was not in a party.");
-                return;
+                var packet = new GamePacketReader(packetData);
+                var message = packet.ReadString() ?? string.Empty;
+
+                // normalização básica
+                message = message.Replace("\r", " ").Replace("\n", " ").Trim();
+                if (message.Length > MaxMessageLength)
+                    message = message.Substring(0, MaxMessageLength);
+
+                if (string.IsNullOrWhiteSpace(message))
+                {
+                    // silencioso ou responde com system msg, como preferires:
+                    // client.Send(new SystemMessagePacket("Empty party message."));
+                    _logger.Debug("PartyMessage: empty message from TamerId={TamerId}", client.TamerId);
+                    return;
+                }
+
+                var party = _partyManager.FindParty(client.TamerId);
+                if (party == null)
+                {
+                    client.Send(new SystemMessagePacket("You need to be in a party to send party messages."));
+                    _logger.Warning("PartyMessage: TamerId={TamerId} sent party msg but is not in a party.", client.TamerId);
+                    return;
+                }
+
+                // prepara payload uma única vez
+                var payload = new PartyMessagePacket(client.Tamer.Name, message).Serialize();
+
+                // snapshot dos IDs para evitar mutações durante o loop
+                var memberIds = party.GetMembersIdList();
+                var delivered = 0;
+
+                foreach (var memberId in memberIds)
+                {
+                    var target = _mapServer.FindClientByTamerId(memberId)
+                                ?? _dungeonServer.FindClientByTamerId(memberId);
+
+                    if (target == null) continue;
+
+                    target.Send(payload);
+                    delivered++;
+                }
+
+                _logger.Verbose("PartyMessage: TamerId={TamerId} -> PartyId={PartyId} delivered={Delivered}",
+                    client.TamerId, party.Id, delivered);
+
+                // persistência (mantive a tua chamada original)
+                await _sender.Send(new CreateChatMessageCommand(ChatMessageModel.Create(client.TamerId, message)));
             }
-            
-            foreach (var memberId in party.GetMembersIdList())
+            catch (Exception ex)
             {
-                var targetPlayer = _mapServer.FindClientByTamerId(memberId);
-                if (targetPlayer == null) targetPlayer = _dungeonServer.FindClientByTamerId(memberId);
-                targetPlayer.Send(new PartyMessagePacket(client.Tamer.Name, message).Serialize()); 
+                _logger.Error(ex, "PartyMessage: exception processing message from TamerId={TamerId}", client.TamerId);
             }
-
-            _logger.Verbose($"Character {client.TamerId} sent chat to party {party.Id} with message {message}.");
-
-            await _sender.Send(new CreateChatMessageCommand(ChatMessageModel.Create(client.TamerId, message)));
         }
     }
 }

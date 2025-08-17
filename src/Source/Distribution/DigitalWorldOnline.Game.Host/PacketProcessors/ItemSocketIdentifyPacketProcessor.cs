@@ -62,8 +62,8 @@ namespace DigitalWorldOnline.Game.PacketProcessors
 
                 foreach (var apply in itemInfo.ItemInfo.SkillInfo.Apply)
                 {
-                           
-     
+
+
                     int nLv = (itemInfo.ItemInfo.Type == 63) ? (int)itemInfo.ItemInfo.TypeN : (int)itemInfo.ItemInfo.TypeN;
                     int nValue = 0;
 
@@ -84,7 +84,7 @@ namespace DigitalWorldOnline.Game.PacketProcessors
                     break;
                 }
 
-                client.Send(new ItemSocketIdentifyPacket(itemInfo,(int)client.Tamer.Inventory.Bits));
+                client.Send(new ItemSocketIdentifyPacket(itemInfo, (int)client.Tamer.Inventory.Bits));
 
                 await _sender.Send(new UpdateItemAccessoryStatusCommand(itemInfo));
                 await _sender.Send(new UpdateItemListBitsCommand(client.Tamer.Inventory));

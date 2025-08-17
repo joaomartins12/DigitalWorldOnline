@@ -45,73 +45,132 @@ namespace DigitalWorldOnline.Game.PacketProcessors
             var sequencialId = packet.ReadInt();
             var requestAmount = packet.ReadInt();
 
-            var increaseRateItem = packet.ReadInt(); //Não implementado no client
-            var protectItem = packet.ReadInt(); //TODO: obter o item id correto para remoção
+            // ainda não utilizados pelo cliente
+            var increaseRateItem = packet.ReadInt();
+            var protectItem = packet.ReadInt();
 
-            var craftRecipe = _mapper.Map<ItemCraftAssetModel>(await _sender.Send(new ItemCraftAssetsByFilterQuery(npcId, sequencialId)));
+            if (requestAmount <= 0)
+            {
+                client.Send(new SystemMessagePacket("Invalid craft amount."));
+                _logger.Warning("ItemCraft: invalid requestAmount {Amount} (tamer {TamerId}).", requestAmount, client.TamerId);
+                return;
+            }
+
+            var craftRecipe = _mapper.Map<ItemCraftAssetModel>(
+                await _sender.Send(new ItemCraftAssetsByFilterQuery(npcId, sequencialId))
+            );
 
             if (craftRecipe == null)
             {
                 client.Send(new SystemMessagePacket($"Item craft not found with NPC id {npcId} and id {sequencialId}."));
-                _logger.Warning($"Item craft not found with NPC id {npcId} and id {sequencialId} for tamer {client.TamerId}.");
+                _logger.Warning("Item craft not found with NPC id {NpcId} and id {SeqId} (tamer {TamerId}).",
+                    npcId, sequencialId, client.TamerId);
                 return;
             }
 
-            var totalPrice = requestAmount * craftRecipe.Price;
+            // item resultante da receita
+            var craftedItemProto = new ItemModel(craftRecipe.ItemId, craftRecipe.Amount);
+            craftedItemProto.SetItemInfo(_assets.ItemInfo.FirstOrDefault(x => x.ItemId == craftRecipe.ItemId));
 
-            /*if (!client.Tamer.Inventory.RemoveBits(totalPrice))
+            if (craftedItemProto.ItemInfo == null)
             {
-                client.Send(new SystemMessagePacket($"Insuficient bits for item craft NPC id {npcId} and id {sequencialId}."));
-                _logger.Warning($"Insuficient bits for item craft NPC id {npcId} and id {sequencialId} for tamer {client.TamerId}.");
+                client.Send(new SystemMessagePacket($"Invalid crafted item info for item id {craftRecipe.ItemId}."));
+                _logger.Warning("ItemCraft: invalid crafted item info {ItemId} (tamer {TamerId}).",
+                    craftRecipe.ItemId, client.TamerId);
                 return;
-            }*/
+            }
 
-            var craftedItem = new ItemModel(craftRecipe.ItemId, craftRecipe.Amount);
-            craftedItem.SetItemInfo(_assets.ItemInfo.FirstOrDefault(x => x.ItemId == craftRecipe.ItemId));
-
-            craftedItem.SetDefaultRemainingTime();
+            // prepara tempo padrão se for temporário
+            craftedItemProto.SetDefaultRemainingTime();
 
             var totalCrafted = 0;
-            var tries = requestAmount;
+            var triesLeft = requestAmount;
 
-            while (tries > 0)
+            while (triesLeft > 0)
             {
+                // 1) remover materiais desta tentativa (com rollback local se faltar)
+                var removedThisTry = new List<ItemModel>();
+                bool materialsOk = true;
+
                 foreach (var material in craftRecipe.Materials)
                 {
-                    if (!client.Tamer.Inventory.RemoveOrReduceItemWithoutSlot(new ItemModel(material.ItemId, material.Amount)))
+                    var needed = new ItemModel(material.ItemId, material.Amount);
+                    if (!client.Tamer.Inventory.RemoveOrReduceItemWithoutSlot(needed))
                     {
-                        client.Send(new SystemMessagePacket($"Insuficient items for item craft NPC id {npcId} and id {sequencialId}."));
-                        return;
+                        materialsOk = false;
+                        break;
                     }
+
+                    removedThisTry.Add(needed);
                 }
 
+                if (!materialsOk)
+                {
+                    // devolve materiais desta tentativa
+                    foreach (var m in removedThisTry)
+                        client.Tamer.Inventory.AddItem(new ItemModel(m.ItemId, m.Amount));
+
+                    client.Send(new SystemMessagePacket("Insufficient materials to continue crafting."));
+                    _logger.Verbose("ItemCraft: insufficient materials on try {Try}, stopped early (tamer {TamerId}).",
+                        (requestAmount - triesLeft + 1), client.TamerId);
+                    break;
+                }
+
+                // 2) remover bits desta tentativa (com rollback de materiais em caso de falha)
                 if (!client.Tamer.Inventory.RemoveBits(craftRecipe.Price))
                 {
-                    client.Send(new SystemMessagePacket($"Insuficient bits for item craft NPC id {npcId} and id {sequencialId}."));
-                    return;
+                    foreach (var m in removedThisTry)
+                        client.Tamer.Inventory.AddItem(new ItemModel(m.ItemId, m.Amount));
+
+                    client.Send(new SystemMessagePacket("Insufficient bits to continue crafting."));
+                    _logger.Verbose("ItemCraft: insufficient bits on try {Try}, stopped early (tamer {TamerId}).",
+                        (requestAmount - triesLeft + 1), client.TamerId);
+                    break;
                 }
 
-                if (craftRecipe.SuccessRate >= UtilitiesFunctions.RandomByte(maxValue: 100))
+                // 3) rolar chance
+                var success = craftRecipe.SuccessRate >= UtilitiesFunctions.RandomByte(maxValue: 100);
+                if (success)
                 {
-                    var tempItem = (ItemModel)craftedItem.Clone();
-                    client.Tamer.Inventory.AddItem(tempItem);
-
                     totalCrafted++;
                 }
 
-                tries--;
+                triesLeft--;
             }
 
+            // adicionar ao inventário os itens craftados
+            if (totalCrafted > 0)
+            {
+                for (int i = 0; i < totalCrafted; i++)
+                {
+                    var temp = (ItemModel)craftedItemProto.Clone();
+                    var added = client.Tamer.Inventory.AddItem(temp);
+                    if (!added)
+                    {
+                        client.Send(new SystemMessagePacket("Inventory full while adding crafted items."));
+                        _logger.Warning("ItemCraft: inventory full when adding crafted output (tamer {TamerId}).", client.TamerId);
+                        break;
+                    }
+                }
+            }
+
+            var attemptsDone = requestAmount - triesLeft;
             var materialList = string.Join(',', craftRecipe.Materials.Select(x => $"{x.ItemId} x{x.Amount}"));
+            var bitsSpent = attemptsDone * craftRecipe.Price;
 
-            _logger.Verbose($"Character {client.TamerId} crafted {craftRecipe.ItemId} with {materialList} and {craftRecipe.Price} bits {requestAmount} times.");
+            _logger.Verbose(
+                "Character {TamerId} attempted craft {ItemId} {Times}x (success {Success}x) with {Materials} and {Bits} bits.",
+                client.TamerId, craftRecipe.ItemId, attemptsDone, totalCrafted, materialList, bitsSpent
+            );
 
+            // persistências finais
             await _sender.Send(new UpdateItemListBitsCommand(client.Tamer.Inventory));
             await _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
 
+            // feedback ao cliente
             client.Send(
                 UtilitiesFunctions.GroupPackets(
-                    new CraftItemPacket(craftRecipe, requestAmount, totalCrafted).Serialize(),
+                    new CraftItemPacket(craftRecipe, attemptsDone, totalCrafted).Serialize(),
                     new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory).Serialize()
                 )
             );

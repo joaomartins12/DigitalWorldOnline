@@ -1,4 +1,5 @@
-﻿using DigitalWorldOnline.Application.Separar.Commands.Update;
+﻿using System;
+using DigitalWorldOnline.Application.Separar.Commands.Update;
 using DigitalWorldOnline.Commons.Entities;
 using DigitalWorldOnline.Commons.Enums.PacketProcessor;
 using DigitalWorldOnline.Commons.Interfaces;
@@ -25,14 +26,34 @@ namespace DigitalWorldOnline.Game.PacketProcessors
         public async Task Process(GameClient client, byte[] packetData)
         {
             var packet = new GamePacketReader(packetData);
+            short questId = packet.ReadShort();
 
-            var questId = packet.ReadShort();
+            try
+            {
+                _logger.Verbose("QuestGiveUp: Tamer {TamerId} solicitou desistir da quest {QuestId}.",
+                    client?.TamerId, questId);
 
-            _logger.Verbose($"Character {client.TamerId} gave up quest {questId}.");
+                // Remove do progresso do jogador; retorna o ID do registro ativo (Guid?) se existir
+                Guid? removedId = client?.Tamer?.Progress?.RemoveQuest(questId);
 
-            var id = client.Tamer.Progress.RemoveQuest(questId);
-
-            await _sender.Send(new RemoveActiveQuestCommand(id));
+                if (removedId.HasValue)
+                {
+                    await _sender.Send(new RemoveActiveQuestCommand(removedId.Value));
+                    _logger.Verbose("QuestGiveUp: quest {QuestId} removida (activeId={ActiveId}) para tamer {TamerId}.",
+                        questId, removedId.Value, client?.TamerId);
+                }
+                else
+                {
+                    _logger.Warning("QuestGiveUp: quest {QuestId} não estava ativa para tamer {TamerId}. Nada a remover.",
+                        questId, client?.TamerId);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "QuestGiveUp: exceção ao desistir da quest {QuestId} (tamer {TamerId}).",
+                    questId, client?.TamerId);
+                // Mantemos silencioso no cliente para não poluir o chat; servidor já loga o problema.
+            }
         }
     }
 }

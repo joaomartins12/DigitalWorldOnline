@@ -148,107 +148,100 @@ namespace DigitalWorldOnline.GameHost
                 {
                     tamer.SetLastExpiredItemsCheck();
 
-                    foreach (var item in tamer.Inventory.EquippedItems)
+                    // INVENTORY
+                    var invExpired = tamer.Inventory.EquippedItems
+                        .Where(item => item.ItemInfo != null && item.IsTemporary && item.Expired)
+                        .ToList();
+
+                    foreach (var item in invExpired)
                     {
-                        if (item.ItemInfo != null && item.IsTemporary && item.Expired)
+                        if (item.ItemInfo.UseTimeType == 2 || item.ItemInfo.UseTimeType == 3)
                         {
-
-                            if (item.ItemInfo.UseTimeType == 2 || item.ItemInfo.UseTimeType == 3)
-                            {
-                                item.SetFirstExpired(false);
-
-                                client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabInven, item.Slot, item.ItemId, ExpiredTypeEnum.Quit));
-                            }
-                            else
-                            {
-
-                                client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabInven, item.Slot, item.ItemId, ExpiredTypeEnum.Remove));
-                                tamer.Inventory.RemoveOrReduceItem(item, item.Amount);
-                            }
+                            item.SetFirstExpired(false);
+                            client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabInven, item.Slot, item.ItemId, ExpiredTypeEnum.Quit));
+                        }
+                        else
+                        {
+                            client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabInven, item.Slot, item.ItemId, ExpiredTypeEnum.Remove));
+                            tamer.Inventory.RemoveOrReduceItem(item, item.Amount);
                         }
                     }
 
-                    foreach (var item in tamer.Warehouse.EquippedItems)
+                    // WAREHOUSE
+                    var whExpired = tamer.Warehouse.EquippedItems
+                        .Where(item => item.ItemInfo != null && item.IsTemporary && item.Expired)
+                        .ToList();
+
+                    foreach (var item in whExpired)
                     {
-                        if (item.ItemInfo != null && item.IsTemporary && item.Expired)
+                        if (item.ItemInfo.UseTimeType == 2 || item.ItemInfo.UseTimeType == 3)
                         {
-
-                            if (item.ItemInfo.UseTimeType == 2 || item.ItemInfo.UseTimeType == 3)
-                            {
-                                item.SetFirstExpired(false);
-
-                                client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabWarehouse, item.Slot, item.ItemId, ExpiredTypeEnum.Quit));
-                            }
-                            else
-                            {
-
-                                client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabWarehouse, item.Slot, item.ItemId, ExpiredTypeEnum.Remove));
-                                tamer.Inventory.RemoveOrReduceItem(item, item.Amount);
-                            }
+                            item.SetFirstExpired(false);
+                            client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabWarehouse, item.Slot, item.ItemId, ExpiredTypeEnum.Quit));
+                        }
+                        else
+                        {
+                            client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabWarehouse, item.Slot, item.ItemId, ExpiredTypeEnum.Remove));
+                            tamer.Warehouse.RemoveOrReduceItem(item, item.Amount); // << corrigido (era Inventory)
                         }
                     }
 
-                    foreach (var item in tamer.AccountWarehouse.EquippedItems)
+                    // ACCOUNT WAREHOUSE (Share Stash)
+                    var accWhExpired = tamer.AccountWarehouse.EquippedItems
+                        .Where(item => item.ItemInfo != null && item.IsTemporary && item.Expired)
+                        .ToList();
+
+                    foreach (var item in accWhExpired)
                     {
-                        if (item.ItemInfo != null && item.IsTemporary && item.Expired)
+                        if (item.ItemInfo.UseTimeType == 2 || item.ItemInfo.UseTimeType == 3)
                         {
-
-                            if (item.ItemInfo.UseTimeType == 2 || item.ItemInfo.UseTimeType == 3)
-                            {
-                                item.SetFirstExpired(false);
-
-                                client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabShareStash, item.Slot, item.ItemId, ExpiredTypeEnum.Quit));
-                            }
-                            else
-                            {
-
-                                client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabShareStash, item.Slot, item.ItemId, ExpiredTypeEnum.Remove));
-                                tamer.AccountWarehouse.RemoveOrReduceItem(item, item.Amount);
-                            }
+                            item.SetFirstExpired(false);
+                            client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabShareStash, item.Slot, item.ItemId, ExpiredTypeEnum.Quit));
+                        }
+                        else
+                        {
+                            client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabShareStash, item.Slot, item.ItemId, ExpiredTypeEnum.Remove));
+                            tamer.AccountWarehouse.RemoveOrReduceItem(item, item.Amount);
                         }
                     }
 
-                    foreach (var item in tamer.Equipment.EquippedItems)
+                    // EQUIPMENT
+                    var equipExpired = tamer.Equipment.EquippedItems
+                        .Where(item => item.ItemInfo != null && item.IsTemporary && item.Expired)
+                        .ToList();
+
+                    foreach (var item in equipExpired)
                     {
-                        if (item.ItemInfo != null && item.IsTemporary && item.Expired)
+                        if (item.ItemInfo.UseTimeType == 2)
                         {
-
-                            if (item.ItemInfo.UseTimeType == 2)
-                            {
-                                item.SetFirstExpired(false);
-
-                                client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabEquip, item.Slot, item.ItemId, ExpiredTypeEnum.Quit));
-                            }
-                            else
-                            {
-
-                                client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabEquip, item.Slot, item.ItemId, ExpiredTypeEnum.Remove));
-                                tamer.Equipment.RemoveOrReduceItem(item, item.Amount);
-                            }
+                            item.SetFirstExpired(false);
+                            client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabEquip, item.Slot, item.ItemId, ExpiredTypeEnum.Quit));
+                        }
+                        else
+                        {
+                            client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabEquip, item.Slot, item.ItemId, ExpiredTypeEnum.Remove));
+                            tamer.Equipment.RemoveOrReduceItem(item, item.Amount);
                         }
                     }
 
-                    foreach (var item in tamer.ChipSets.EquippedItems)
+                    // CHIPSETS
+                    var chipExpired = tamer.ChipSets.EquippedItems
+                        .Where(item => item.ItemInfo != null && item.IsTemporary && item.Expired)
+                        .ToList();
+
+                    foreach (var item in chipExpired)
                     {
-                        if (item.ItemInfo != null && item.IsTemporary && item.Expired)
+                        if (item.ItemInfo.UseTimeType == 2)
                         {
-
-                            if (item.ItemInfo.UseTimeType == 2)
-                            {
-                                item.SetFirstExpired(false);
-
-                                client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabChipset, item.Slot, item.ItemId, ExpiredTypeEnum.Quit));
-                            }
-                            else
-                            {
-
-                                client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabChipset, item.Slot, item.ItemId, ExpiredTypeEnum.Remove));
-                                tamer.ChipSets.RemoveOrReduceItem(item, item.Amount);
-                            }
+                            item.SetFirstExpired(false);
+                            client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabChipset, item.Slot, item.ItemId, ExpiredTypeEnum.Quit));
+                        }
+                        else
+                        {
+                            client.Send(new ItemExpiredPacket(InventorySlotTypeEnum.TabChipset, item.Slot, item.ItemId, ExpiredTypeEnum.Remove));
+                            tamer.ChipSets.RemoveOrReduceItem(item, item.Amount);
                         }
                     }
-
-
 
                     _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
                     _sender.Send(new UpdateItemsCommand(client.Tamer.Warehouse));
@@ -486,6 +479,9 @@ namespace DigitalWorldOnline.GameHost
             // Iterar sobre a cópia da lista
             mobsCopy.ForEach(mob =>
             {
+                if (mob == null)
+                    return;
+
                 if (tamer.TempShowFullMap)
                 {
                     if (!tamer.MobsInView.Contains(mob.Id))
@@ -493,20 +489,17 @@ namespace DigitalWorldOnline.GameHost
                 }
                 else
                 {
-                    if (mob != null)
-                    {
-                        var distanceDifference = UtilitiesFunctions.CalculateDistance(
-                            tamer.Location.X,
-                            mob.CurrentLocation.X,
-                            tamer.Location.Y,
-                            mob.CurrentLocation.Y);
+                    var distanceDifference = UtilitiesFunctions.CalculateDistance(
+                        tamer.Location.X,
+                        mob.CurrentLocation.X,
+                        tamer.Location.Y,
+                        mob.CurrentLocation.Y);
 
-                        if (distanceDifference <= _startToSee && !tamer.MobsInView.Contains(mob.Id))
-                            mobsToAdd.Add(mob.Id);
+                    if (distanceDifference <= _startToSee && !tamer.MobsInView.Contains(mob.Id))
+                        mobsToAdd.Add(mob.Id);
 
-                        if (distanceDifference >= _stopSeeing && tamer.MobsInView.Contains(mob.Id))
-                            mobsToRemove.Add(mob.Id);
-                    }
+                    if (distanceDifference >= _stopSeeing && tamer.MobsInView.Contains(mob.Id))
+                        mobsToRemove.Add(mob.Id);
                 }
             });
 
@@ -699,7 +692,10 @@ namespace DigitalWorldOnline.GameHost
         {
             if (!tamer.Partner.AutoAttack) return;
 
-            if (!tamer.Partner.IsAttacking && tamer.TargetMob != null && tamer.TargetMob.Alive & tamer.Partner.Alive)
+            if (!tamer.Partner.IsAttacking
+    && tamer.Partner.Alive
+    && tamer.TargetMob != null
+    && tamer.TargetMob.Alive)
             {
                 tamer.Partner.SetEndAttacking(tamer.Partner.AS);
                 tamer.SetHidden(false);
@@ -730,17 +726,17 @@ namespace DigitalWorldOnline.GameHost
                 if (missed)
                 {
                     _logger.Verbose($"Partner {tamer.Partner.Id} missed hit on {tamer.TargetMob.Id} - {tamer.TargetMob.Name}.");
-                    BroadcastForTamerViewsAndSelf(tamer.Id, new MissHitPacket(tamer.Partner.GeneralHandler, tamer.TargetMob.GeneralHandler).Serialize());
+                    BroadcastForTamerViewsAndSelf(tamer.Id,
+                        new MissHitPacket(tamer.Partner.GeneralHandler, tamer.TargetMob.GeneralHandler).Serialize());
                 }
                 else
                 {
-                    #region Hit Damage
-
+                    // Hit Damage
                     var critBonusMultiplier = 0.00;
                     var blocked = false;
-                    var finalDmg = tamer.GodMode ? tamer.TargetMob.CurrentHP : CalculateDamage(tamer, out critBonusMultiplier, out blocked);
-
-                    #endregion
+                    var finalDmg = tamer.GodMode
+                        ? tamer.TargetMob.CurrentHP
+                        : CalculateDamage(tamer, out critBonusMultiplier, out blocked);
 
                     if (finalDmg <= 0) finalDmg = 1;
                     if (finalDmg > tamer.TargetMob.CurrentHP) finalDmg = tamer.TargetMob.CurrentHP;
@@ -751,25 +747,28 @@ namespace DigitalWorldOnline.GameHost
 
                     if (newHp > 0)
                     {
-                        _logger.Verbose($"Partner {tamer.Partner.Id} inflicted {finalDmg} to mob {tamer.TargetMob?.Id} - {tamer.TargetMob?.Name}({tamer.TargetMob?.Type}).");
+                        _logger.Verbose(
+                            $"Partner {tamer.Partner.Id} inflicted {finalDmg} to mob {tamer.TargetMob?.Id} - {tamer.TargetMob?.Name}({tamer.TargetMob?.Type}).");
 
-                        BroadcastForTamerViewsAndSelf(tamer.Id, new HitPacket(tamer.Partner.GeneralHandler, tamer.TargetMob.GeneralHandler, finalDmg, tamer.TargetMob.HPValue, newHp, hitType).Serialize());
+                        BroadcastForTamerViewsAndSelf(tamer.Id,
+                            new HitPacket(tamer.Partner.GeneralHandler, tamer.TargetMob.GeneralHandler, finalDmg,
+                                          tamer.TargetMob.HPValue, newHp, hitType).Serialize());
                     }
                     else
                     {
-                        _logger.Verbose($"Partner {tamer.Partner.Id} killed mob {tamer.TargetMob?.Id} - {tamer.TargetMob?.Name}({tamer.TargetMob?.Type}) with {finalDmg} damage.");
+                        _logger.Verbose(
+                            $"Partner {tamer.Partner.Id} killed mob {tamer.TargetMob?.Id} - {tamer.TargetMob?.Name}({tamer.TargetMob?.Type}) with {finalDmg} damage.");
 
-                        BroadcastForTamerViewsAndSelf(tamer.Id, new KillOnHitPacket(tamer.Partner.GeneralHandler, tamer.TargetMob.GeneralHandler, finalDmg, hitType).Serialize());
+                        BroadcastForTamerViewsAndSelf(tamer.Id,
+                            new KillOnHitPacket(tamer.Partner.GeneralHandler, tamer.TargetMob.GeneralHandler, finalDmg, hitType).Serialize());
 
                         tamer.TargetMob?.Die();
 
                         if (!MobsAttacking(tamer.Location.MapId, tamer.Id))
                         {
                             tamer.StopBattle();
-
                             BroadcastForTamerViewsAndSelf(tamer.Id, new SetCombatOffPacket(tamer.Partner.GeneralHandler).Serialize());
                         }
-
                     }
                 }
 
@@ -777,8 +776,8 @@ namespace DigitalWorldOnline.GameHost
             }
 
             bool StopAttackMob = tamer.TargetMob == null || tamer.TargetMob.Dead;
-
-            if (StopAttackMob) tamer.Partner?.StopAutoAttack();
+            if (StopAttackMob)
+                tamer.Partner?.StopAutoAttack();
 
         }
 

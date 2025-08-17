@@ -1,4 +1,7 @@
-﻿using DigitalWorldOnline.Commons.Entities;
+﻿using System;
+using System.Linq;
+using System.Threading.Tasks;
+using DigitalWorldOnline.Commons.Entities;
 using DigitalWorldOnline.Commons.Enums.ClientEnums;
 using DigitalWorldOnline.Commons.Enums.PacketProcessor;
 using DigitalWorldOnline.Commons.Interfaces;
@@ -19,153 +22,136 @@ namespace DigitalWorldOnline.Game.PacketProcessors
         private readonly DungeonsServer _dungeonServer;
         private readonly ILogger _logger;
 
-        public PartyRequestResponsePacketProcessor(PartyManager partyManager, MapServer mapServer, DungeonsServer dungeonServer, ILogger logger)
+        private const int InviteRejected = -1;
+
+        public PartyRequestResponsePacketProcessor(
+            PartyManager partyManager,
+            MapServer mapServer,
+            DungeonsServer dungeonServer,
+            ILogger logger)
         {
             _partyManager = partyManager;
-            _dungeonServer = dungeonServer;
             _mapServer = mapServer;
+            _dungeonServer = dungeonServer;
             _logger = logger;
         }
 
         public Task Process(GameClient client, byte[] packetData)
         {
-            var packet = new GamePacketReader(packetData);
-
-            var inviteResult = packet.ReadInt();
-            var leaderName = packet.ReadString();
-
-            var leaderClient = _mapServer.FindClientByTamerName(leaderName);
-
-            if (leaderClient == null)
+            try
             {
-                leaderClient = _dungeonServer.FindClientByTamerName(leaderName);
+                var packet = new GamePacketReader(packetData);
+                var inviteResult = packet.ReadInt();
+                var leaderNameRaw = packet.ReadString();
+                var leaderName = leaderNameRaw?.Trim();
 
-                if (leaderClient != null)
+                if (string.IsNullOrWhiteSpace(leaderName))
                 {
-                    var dungeonParty = _partyManager.FindParty(leaderClient.TamerId);
-
-                    if (dungeonParty == null)
-                    {
-                        dungeonParty = _partyManager.CreateParty(leaderClient.Tamer, client.Tamer);
-                        _logger.Verbose($"Character {leaderClient.TamerId} created party {dungeonParty.Id} with {client.TamerId}.");
-
-                        if (leaderClient.DungeonMap)
-                        {
-                            var targetMap = _dungeonServer.Maps.FirstOrDefault(x => x.DungeonId == leaderClient.TamerId);
-
-                            if (targetMap != null)
-                            {
-                                targetMap.SetId(dungeonParty.Id);
-                            }
-                        }
-
-                        leaderClient.Send(new PartyCreatedPacket(dungeonParty.Id, dungeonParty.LootType));
-                        leaderClient.Send(new PartyMemberJoinPacket(dungeonParty[client.TamerId], true));
-                        leaderClient.Send(new PartyMemberInfoPacket(dungeonParty[client.TamerId]));
-                        leaderClient.Send(new PartyRequestSentFailedPacket(PartyRequestFailedResultEnum.Accept, client.Tamer.Name));
-
-                        client.Send(new PartyMemberListPacket(dungeonParty, client.TamerId));
-
-                    }
-                    else
-                    {
-                        dungeonParty.AddMember(client.Tamer);
-                        _logger.Verbose($"Character {client.TamerId} joinned party {dungeonParty.Id} (leader {leaderClient.TamerId}).");
-
-                        client.Send(new PartyMemberListPacket(dungeonParty, client.TamerId, (byte)(dungeonParty.Members.Count - 1)));
-                        leaderClient.Send(new PartyRequestSentFailedPacket(PartyRequestFailedResultEnum.Accept, client.Tamer.Name));
-
-                        foreach (var target in dungeonParty.Members.Values)
-                        {
-                            var targetClient = _mapServer.FindClientByTamerId(target.Id);
-
-                            if (targetClient == null) targetClient = _dungeonServer.FindClientByTamerId(target.Id);
-
-                            if (targetClient == null) continue;
-
-                            if (target.Id != client.Tamer.Id)
-                            {
-                                if (targetClient.Tamer.Id == dungeonParty.LeaderId)
-                                {
-                                    targetClient.Send(new PartyMemberJoinPacket(dungeonParty[client.TamerId], true));
-                                    targetClient.Send(new PartyMemberInfoPacket(dungeonParty[client.TamerId], true));
-                                }
-                                else
-                                {
-                                    targetClient.Send(new PartyMemberJoinPacket(dungeonParty[client.TamerId]));
-                                    targetClient.Send(new PartyMemberInfoPacket(dungeonParty[client.TamerId]));
-                                }
-                            }
-                        }
-                    }
-
+                    client.Send(new SystemMessagePacket("Invalid party leader name."));
+                    _logger.Warning("PartyInviteResponse: empty leader name from TamerId={TamerId}", client.TamerId);
                     return Task.CompletedTask;
                 }
-                else
+
+                var leaderClient = FindClientByName(leaderName);
+                if (leaderClient == null)
                 {
-                    _logger.Warning($"Unable to find party leader with name {leaderName}.");
+                    _logger.Warning("PartyInviteResponse: leader '{Leader}' not found.", leaderName);
                     client.Send(new SystemMessagePacket($"Unable to find party leader with name {leaderName}."));
                     return Task.CompletedTask;
                 }
-            }
 
-            if (inviteResult == -1)
-            {
-                leaderClient.Send(new PartyRequestSentFailedPacket(PartyRequestFailedResultEnum.Rejected, client.Tamer.Name));
-                _logger.Verbose($"Character {client.TamerId} refused party invite from {leaderClient.TamerId}.");
+                // Rejeitado
+                if (inviteResult == InviteRejected)
+                {
+                    leaderClient.Send(new PartyRequestSentFailedPacket(PartyRequestFailedResultEnum.Rejected, client.Tamer.Name));
+                    _logger.Verbose("PartyInviteResponse: TamerId={Client} refused invite from LeaderId={Leader}.",
+                        client.TamerId, leaderClient.TamerId);
+                    return Task.CompletedTask;
+                }
+
+                // Aceite
+                var party = _partyManager.FindParty(leaderClient.TamerId);
+
+                if (party == null)
+                {
+                    // criar party
+                    party = _partyManager.CreateParty(leaderClient.Tamer, client.Tamer);
+                    _logger.Verbose("PartyInviteResponse: LeaderId={Leader} created PartyId={Party} with MemberId={Member}.",
+                        leaderClient.TamerId, party.Id, client.TamerId);
+
+                    // se o líder está numa dungeon, propaga o id da party ao mapa da dungeon (mantive a tua lógica)
+                    if (leaderClient.DungeonMap)
+                    {
+                        var targetMap = _dungeonServer.Maps.FirstOrDefault(x => x.DungeonId == leaderClient.TamerId);
+                        targetMap?.SetId(party.Id);
+                    }
+
+                    // notificações
+                    leaderClient.Send(new PartyCreatedPacket(party.Id, party.LootType));
+                    leaderClient.Send(new PartyRequestSentFailedPacket(PartyRequestFailedResultEnum.Accept, client.Tamer.Name));
+                    leaderClient.Send(new PartyMemberJoinPacket(party[client.TamerId], true));
+                    leaderClient.Send(new PartyMemberInfoPacket(party[client.TamerId]));
+
+                    client.Send(new PartyMemberListPacket(party, client.TamerId));
+                }
+                else
+                {
+                    // adicionar membro
+                    party.AddMember(client.Tamer);
+                    _logger.Verbose("PartyInviteResponse: MemberId={Member} joined PartyId={Party} (LeaderId={Leader}).",
+                        client.TamerId, party.Id, leaderClient.TamerId);
+
+                    // index do slot do novo membro (count-1 após Add)
+                    client.Send(new PartyMemberListPacket(party, client.TamerId, (byte)(party.Members.Count - 1)));
+                    leaderClient.Send(new PartyRequestSentFailedPacket(PartyRequestFailedResultEnum.Accept, client.Tamer.Name));
+
+                    // avisar restantes membros (mapa/dungeon), exceto o próprio que entrou
+                    BroadcastJoinToExistingMembers(party, client.Tamer.Id);
+                }
+
                 return Task.CompletedTask;
             }
-
-            var party = _partyManager.FindParty(leaderClient.TamerId);
-
-            if (party == null)
+            catch (Exception ex)
             {
-                party = _partyManager.CreateParty(leaderClient.Tamer, client.Tamer);
-                _logger.Verbose($"Character {leaderClient.TamerId} created party {party.Id} with {client.TamerId}.");
-
-                if (leaderClient.DungeonMap)
-                {
-                    var targetMap = _dungeonServer.Maps.FirstOrDefault(x => x.DungeonId == leaderClient.TamerId);
-
-                    if (targetMap != null)
-                    {
-                        targetMap.SetId(party.Id);
-                    }
-                }
-
-                leaderClient.Send(new PartyCreatedPacket(party.Id, party.LootType));
-
-                client.Send(new PartyMemberListPacket(party, client.TamerId));
-                leaderClient.Send(new PartyRequestSentFailedPacket(PartyRequestFailedResultEnum.Accept, client.Tamer.Name));
-                leaderClient.Send(new PartyMemberJoinPacket(party[client.TamerId], true));
-                leaderClient.Send(new PartyMemberInfoPacket(party[client.TamerId]));
-
+                _logger.Error(ex, "PartyInviteResponse: exception processing response from TamerId={TamerId}", client.TamerId);
+                return Task.CompletedTask;
             }
-            else
+        }
+
+        private GameClient? FindClientByName(string name)
+        {
+            var c = _mapServer.FindClientByTamerName(name);
+            return c ?? _dungeonServer.FindClientByTamerName(name);
+        }
+
+        private void BroadcastJoinToExistingMembers(Commons.Models.Mechanics.GameParty party, long joinedTamerId)
+        {
+            // snapshot
+            var memberPairs = party.Members.ToList();
+            var joinEntry = party[joinedTamerId];
+
+            foreach (var kv in memberPairs)
             {
-                party.AddMember(client.Tamer);
-                _logger.Verbose($"Character {client.TamerId} joinned party {party.Id} (leader {leaderClient.TamerId}).");
+                var member = kv.Value;
+                if (member.Id == joinedTamerId) continue;
 
-                client.Send(new PartyMemberListPacket(party, client.TamerId, (byte)(party.Members.Count - 1)));
-                leaderClient.Send(new PartyRequestSentFailedPacket(PartyRequestFailedResultEnum.Accept, client.Tamer.Name));
+                var targetClient = _mapServer.FindClientByTamerId(member.Id)
+                                  ?? _dungeonServer.FindClientByTamerId(member.Id);
 
-                foreach (var target in party.Members.Values)
+                if (targetClient == null) continue;
+
+                var isLeader = (member.Id == party.LeaderId);
+                if (isLeader)
                 {
-                    var targetClient = _mapServer.FindClientByTamerId(target.Id);
-
-                    if (targetClient == null) targetClient = _dungeonServer.FindClientByTamerId(target.Id);
-
-                    if (targetClient == null) continue;
-
-                    if (target.Id != client.Tamer.Id)
-                    {
-                        targetClient.Send(new PartyMemberJoinPacket(party[client.TamerId]));
-                        targetClient.Send(new PartyMemberInfoPacket(party[client.TamerId]));
-                    }
+                    targetClient.Send(new PartyMemberJoinPacket(joinEntry, true));
+                    targetClient.Send(new PartyMemberInfoPacket(joinEntry, true));
+                }
+                else
+                {
+                    targetClient.Send(new PartyMemberJoinPacket(joinEntry));
+                    targetClient.Send(new PartyMemberInfoPacket(joinEntry));
                 }
             }
-
-            return Task.CompletedTask;
         }
     }
 }

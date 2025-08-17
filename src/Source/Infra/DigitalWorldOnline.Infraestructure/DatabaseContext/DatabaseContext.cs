@@ -24,7 +24,7 @@ namespace DigitalWorldOnline.Infraestructure
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder) //DESKTOP-EH8O5NE
         {
             //if (_cliInitialization)
-            optionsBuilder.UseSqlServer("Server=26.253.222.118\\MSSQL;Database=dmo;User Id=sa;Password=123456;TrustServerCertificate=True;", sqlServerOptions =>
+            optionsBuilder.UseSqlServer("Server=26.249.80.49\\MSSQL;Database=dmo;User Id=sa;Password=123456;TrustServerCertificate=True;", sqlServerOptions =>
             {
                 sqlServerOptions.EnableRetryOnFailure(
                     maxRetryCount: 5, // Número máximo de tentativas

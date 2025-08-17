@@ -15,7 +15,6 @@ using DigitalWorldOnline.Game.Managers;
 using DigitalWorldOnline.GameHost;
 using MediatR;
 using Serilog;
-using System;
 
 namespace DigitalWorldOnline.Game.PacketProcessors
 {
@@ -62,73 +61,80 @@ namespace DigitalWorldOnline.Game.PacketProcessors
                 return;
             }
 
-            var evoLine = _assets.EvolutionInfo.FirstOrDefault(x => x.Type == client.Partner.BaseType)?
-                .Lines.FirstOrDefault(x => x.Type == client.Partner.CurrentType)?.Stages;
+            var evoInfoRoot = _assets.EvolutionInfo.FirstOrDefault(x => x.Type == client.Partner.BaseType);
+            var currentLine = evoInfoRoot?.Lines.FirstOrDefault(x => x.Type == client.Partner.CurrentType);
+            var evoLine = currentLine?.Stages;
 
-            var evoInfo = _assets.EvolutionInfo.FirstOrDefault(x => x.Type == client.Partner.BaseType)?
-                .Lines.FirstOrDefault(x => x.Type == client.Partner.CurrentType);
-
-            var targetInfo = _assets.EvolutionInfo.FirstOrDefault(x => x.Type == client.Partner.BaseType)?
-                .Lines.FirstOrDefault(x => x.Type == evoLine[evoStage].Type);
-
-            if (evoLine == null || !evoLine.Any())
+            if (evoLine == null || evoLine.Count == 0)
             {
                 client.Send(new DigimonEvolutionFailPacket());
                 return;
             }
 
-            if (targetInfo == null)
+            // guarda de índice
+            if (evoStage >= evoLine.Count)
             {
-                _logger.Error($"targetInfo nao encontrada no PartnerEvolution PacketProcessor");
+                _logger.Warning("PartnerEvolution: evoStage fora do intervalo (stage={Stage}, count={Count})", evoStage, evoLine.Count);
+                client.Send(new DigimonEvolutionFailPacket());
+                return;
             }
 
-            //_logger.Information($"evoStage Index: {evoStage} | evoStage Type: {evoLine[evoStage].Type}");
-            //_logger.Information($"Evoline ID: {evoInfo.Id} | Digimon Type Atual: {evoInfo.Type}");
+            var targetStage = evoLine[(int)evoStage];
+            if (targetStage == null)
+            {
+                client.Send(new DigimonEvolutionFailPacket());
+                return;
+            }
 
-            var starterPartners = new List<int>() { 31001, 31002, 31003, 31004 };
+            var targetInfo = evoInfoRoot?.Lines.FirstOrDefault(x => x.Type == targetStage.Type);
+            if (targetInfo == null)
+            {
+                _logger.Error("PartnerEvolution: targetInfo não encontrado para Type={Type}", targetStage.Type);
+                client.Send(new DigimonEvolutionFailPacket());
+                return;
+            }
+
+            var starterPartners = new List<int> { 31001, 31002, 31003, 31004 };
             if (!client.Partner.BaseType.IsBetween(starterPartners.ToArray()))
             {
-                var targetEvo = client.Partner.Evolutions.FirstOrDefault(x => x.Type == evoLine[evoStage].Type);
-
+                var targetEvo = client.Partner.Evolutions.FirstOrDefault(x => x.Type == targetStage.Type);
                 if (targetEvo == null || targetEvo.Unlocked == 0)
                 {
-                    _logger.Verbose($"Tamer {client.Tamer.Name} tryied to evolve {client.Partner.Id}:{client.Partner.BaseInfo.Name} into type {targetEvo?.Type} without unlocking the evo.");
+                    _logger.Verbose("Tamer {Name} tentou evoluir {Id}:{Base} para {Target} sem desbloquear.",
+                        client.Tamer.Name, client.Partner.Id, client.Partner.BaseInfo?.Name, targetEvo?.Type);
                     client.Send(new DigimonEvolutionFailPacket());
                     return;
                 }
             }
             else
             {
-                var targetEvo = client.Partner.Evolutions.FirstOrDefault(x => x.Type == evoLine[evoStage].Type);
-
-                if (targetInfo.SlotLevel > 4 && targetEvo.Unlocked == 0)
+                var targetEvo = client.Partner.Evolutions.FirstOrDefault(x => x.Type == targetStage.Type);
+                if (targetInfo.SlotLevel > 4 && (targetEvo == null || targetEvo.Unlocked == 0))
                 {
-                    _logger.Verbose($"Tamer {client.Tamer.Name} tryied to evolve {client.Partner.Id}:{client.Partner.BaseInfo.Name} into type {targetEvo?.Type} without unlocking the evo.");
+                    _logger.Verbose("Tamer {Name} tentou evoluir starter {Id}:{Base} para {Target} sem desbloquear.",
+                        client.Tamer.Name, client.Partner.Id, client.Partner.BaseInfo?.Name, targetEvo?.Type);
                     client.Send(new DigimonEvolutionFailPacket());
                     return;
                 }
-
             }
 
-            // -- BUFF --------------------------------
-
+            // -- remove buff passivo do parceiro antes de evoluir
             var buffToRemove = client.Tamer.Partner.BuffList.TamerBaseSkill();
-
             if (buffToRemove != null)
             {
-                if (client.DungeonMap)
-                {
-                    _dungeonServer.BroadcastForTamerViewsAndSelf(client.TamerId, new RemoveBuffPacket(client.Partner.GeneralHandler, buffToRemove.BuffId).Serialize());
-                }
-                else
-                {
-                    _mapServer.BroadcastForTamerViewsAndSelf(client.TamerId, new RemoveBuffPacket(client.Partner.GeneralHandler, buffToRemove.BuffId).Serialize());
+                var rm = new RemoveBuffPacket(client.Partner.GeneralHandler, buffToRemove.BuffId).Serialize();
 
-                }
+                // Sempre enviar para o próprio cliente
+                client.Send(new RemoveBuffPacket(client.Partner.GeneralHandler, buffToRemove.BuffId));
+
+                // E só depois para outros jogadores
+                if (client.DungeonMap)
+                    _dungeonServer.BroadcastForTargetTamers(client.TamerId, rm);
+                else
+                    _mapServer.BroadcastForTargetTamers(client.TamerId, rm);
             }
 
             client.Tamer.RemovePartnerPassiveBuff();
-
             await _sender.Send(new UpdateDigimonBuffListCommand(client.Partner.BuffList));
 
             // ---------------------------------------
@@ -138,281 +144,169 @@ namespace DigitalWorldOnline.Game.PacketProcessors
             if (evoStage == 8)
             {
                 evoEffect = DigimonEvolutionEffectEnum.Back;
-
                 client.Tamer.ActiveEvolution.SetDs(0);
                 client.Tamer.ActiveEvolution.SetXg(0);
             }
             else
             {
-                var evolutionType = _assets.DigimonBaseInfo.First(x => x.Type == evoLine[evoStage].Type).EvolutionType;
-                
+                var evolutionType = _assets.DigimonBaseInfo.First(x => x.Type == targetStage.Type).EvolutionType;
+
                 switch ((EvolutionRankEnum)evolutionType)
                 {
                     case EvolutionRankEnum.Rookie:
-                        {
-                            evoEffect = DigimonEvolutionEffectEnum.Default;
-
-                            client.Tamer.ActiveEvolution.SetDs(0);
-                            client.Tamer.ActiveEvolution.SetXg(0);
-                        }
+                        evoEffect = DigimonEvolutionEffectEnum.Default;
+                        client.Tamer.ActiveEvolution.SetDs(0);
+                        client.Tamer.ActiveEvolution.SetXg(0);
                         break;
 
                     case EvolutionRankEnum.Champion:
+                        evoEffect = DigimonEvolutionEffectEnum.Default;
+                        if (client.Partner.Level < targetInfo.UnlockLevel || !client.Tamer.ConsumeDs(20))
                         {
-                            evoEffect = DigimonEvolutionEffectEnum.Default;
-
-                            if (client.Partner.Level < targetInfo.UnlockLevel || !client.Tamer.ConsumeDs(20))
-                            {
-                                client.Send(new DigimonEvolutionFailPacket());
-                                return;
-                            }
-
-                            client.Tamer.ActiveEvolution.SetDs(8);
-                            client.Tamer.ActiveEvolution.SetXg(0);
+                            client.Send(new DigimonEvolutionFailPacket());
+                            return;
                         }
+                        client.Tamer.ActiveEvolution.SetDs(8);
+                        client.Tamer.ActiveEvolution.SetXg(0);
                         break;
 
                     case EvolutionRankEnum.Ultimate:
+                        evoEffect = DigimonEvolutionEffectEnum.Default;
+                        if (client.Partner.Level < targetInfo.UnlockLevel || !client.Tamer.ConsumeDs(50))
                         {
-                            evoEffect = DigimonEvolutionEffectEnum.Default;
-
-                            if (client.Partner.Level < targetInfo.UnlockLevel || !client.Tamer.ConsumeDs(50))
-                            {
-                                client.Send(new DigimonEvolutionFailPacket());
-                                return;
-                            }
-
-                            client.Tamer.ActiveEvolution.SetDs(10);
-                            client.Tamer.ActiveEvolution.SetXg(0);
+                            client.Send(new DigimonEvolutionFailPacket());
+                            return;
                         }
+                        client.Tamer.ActiveEvolution.SetDs(10);
+                        client.Tamer.ActiveEvolution.SetXg(0);
                         break;
 
                     case EvolutionRankEnum.Mega:
+                        evoEffect = DigimonEvolutionEffectEnum.Default;
+                        if (client.Partner.Level < targetInfo.UnlockLevel || !client.Tamer.ConsumeDs(152))
                         {
-                            evoEffect = DigimonEvolutionEffectEnum.Default;
-
-                            if (client.Partner.Level < targetInfo.UnlockLevel || !client.Tamer.ConsumeDs(152))
-                            {
-                                client.Send(new DigimonEvolutionFailPacket());
-                                return;
-                            }
-
-                            client.Tamer.ActiveEvolution.SetDs(12);
-                            client.Tamer.ActiveEvolution.SetXg(0);
+                            client.Send(new DigimonEvolutionFailPacket());
+                            return;
                         }
+                        client.Tamer.ActiveEvolution.SetDs(12);
+                        client.Tamer.ActiveEvolution.SetXg(0);
                         break;
 
                     case EvolutionRankEnum.BurstMode:
+                        evoEffect = DigimonEvolutionEffectEnum.BurstMode;
+                        if (targetInfo.RequiredItem > 0)
                         {
-                            evoEffect = DigimonEvolutionEffectEnum.BurstMode;
+                            var itemToConsume = client.Tamer.Inventory.FindItemById(41002)
+                                                ?? client.Tamer.Inventory.FindItemById(9400);
 
-                            //_logger.Information($"evoInfo.RequiredItem: {targetInfo.RequiredItem}");
-
-                            if (targetInfo.RequiredItem > 0)
+                            if (itemToConsume == null ||
+                                (client.Partner.Level < targetInfo.UnlockLevel && !client.Tamer.ConsumeDs(148)) ||
+                                itemToConsume.Amount < targetInfo.RequiredAmount)
                             {
-                                //_logger.Information($"Searching item 41002 to consume");
-
-                                var itemToConsume = client.Tamer.Inventory.FindItemById(41002);
-
-                                if (itemToConsume == null)
-                                {
-                                    itemToConsume = client.Tamer.Inventory.FindItemById(9400);
-
-                                    if (itemToConsume == null)
-                                    {
-                                        _logger.Verbose($"Accelerator not found");
-                                        client.Send(new DigimonEvolutionFailPacket());
-                                        return;
-                                    }
-                                    else
-                                    {
-                                        if (client.Partner.Level < targetInfo.UnlockLevel && !client.Tamer.ConsumeDs(148) && itemToConsume.Amount < targetInfo.RequiredAmount)
-                                        {
-                                            client.Send(new DigimonEvolutionFailPacket());
-                                            return;
-                                        }
-                                        else
-                                        {
-                                            client.Tamer.Inventory.RemoveOrReduceItem(itemToConsume, targetInfo.RequiredAmount);
-                                            _logger.Verbose($"{targetInfo.RequiredAmount} {itemToConsume.ItemInfo.Name} was consumed !!");
-                                        }
-                                    }
-                                }
-                                else
-                                {
-                                    if (client.Partner.Level < targetInfo.UnlockLevel && !client.Tamer.ConsumeDs(148) && itemToConsume.Amount < targetInfo.RequiredAmount)
-                                    {
-                                        client.Send(new DigimonEvolutionFailPacket());
-                                        return;
-                                    }
-                                    else
-                                    {
-                                        client.Tamer.Inventory.RemoveOrReduceItem(itemToConsume, targetInfo.RequiredAmount);
-                                        _logger.Verbose($"{targetInfo.RequiredAmount} {itemToConsume.ItemInfo.Name} was consumed !!");
-                                    }
-                                }
-
-                            }
-                            else
-                            {
-                                if (client.Partner.Level < targetInfo.UnlockLevel && !client.Tamer.ConsumeDs(148))
-                                {
-                                    client.Send(new DigimonEvolutionFailPacket());
-                                    return;
-                                }
+                                client.Send(new DigimonEvolutionFailPacket());
+                                return;
                             }
 
-                            client.Tamer.ActiveEvolution.SetDs(40);
-                            client.Tamer.ActiveEvolution.SetXg(0);
-
-                            client.Send(new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory));
+                            client.Tamer.Inventory.RemoveOrReduceItem(itemToConsume, targetInfo.RequiredAmount);
+                            _logger.Verbose("{Amount} {Item} consumido para BurstMode.", targetInfo.RequiredAmount, itemToConsume.ItemInfo?.Name);
                         }
+                        else
+                        {
+                            if (client.Partner.Level < targetInfo.UnlockLevel && !client.Tamer.ConsumeDs(148))
+                            {
+                                client.Send(new DigimonEvolutionFailPacket());
+                                return;
+                            }
+                        }
+
+                        client.Tamer.ActiveEvolution.SetDs(40);
+                        client.Tamer.ActiveEvolution.SetXg(0);
+                        client.Send(new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory));
                         break;
 
                     case EvolutionRankEnum.Jogress:
+                        evoEffect = DigimonEvolutionEffectEnum.Default;
+                        if (targetInfo.RequiredItem > 0)
                         {
-                            evoEffect = DigimonEvolutionEffectEnum.Default;
-
-                            if (targetInfo.RequiredItem > 0)
+                            var itemToConsume = client.Tamer.Inventory.FindItemBySection(targetInfo.RequiredItem);
+                            if (itemToConsume == null ||
+                                (client.Partner.Level < targetInfo.UnlockLevel && !client.Tamer.ConsumeDs(180)) ||
+                                !client.Tamer.Inventory.RemoveOrReduceItem(itemToConsume, targetInfo.RequiredAmount))
                             {
-                                var itemToConsume = client.Tamer.Inventory.FindItemBySection(targetInfo.RequiredItem);
-
-                                if (itemToConsume == null)
-                                    _logger.Error($"Item on Section {targetInfo.RequiredItem} not found");
-
-                                if (client.Partner.Level < targetInfo.UnlockLevel && !client.Tamer.ConsumeDs(180) && !client.Tamer.Inventory.RemoveOrReduceItem(itemToConsume, targetInfo.RequiredAmount))
-                                {
-                                    client.Send(new DigimonEvolutionFailPacket());
-                                    return;
-                                }
+                                client.Send(new DigimonEvolutionFailPacket());
+                                return;
                             }
-                            else
-                            {
-                                if (client.Partner.Level < targetInfo.UnlockLevel && !client.Tamer.ConsumeDs(180))
-                                {
-                                    client.Send(new DigimonEvolutionFailPacket());
-                                    return;
-                                }
-
-                            }
-
-                            client.Tamer.ActiveEvolution.SetDs(80);
-                            client.Tamer.ActiveEvolution.SetXg(0);
                         }
+                        else
+                        {
+                            if (client.Partner.Level < targetInfo.UnlockLevel && !client.Tamer.ConsumeDs(180))
+                            {
+                                client.Send(new DigimonEvolutionFailPacket());
+                                return;
+                            }
+                        }
+                        client.Tamer.ActiveEvolution.SetDs(80);
+                        client.Tamer.ActiveEvolution.SetXg(0);
                         break;
 
                     case EvolutionRankEnum.RookieX:
-                        {
-                            evoEffect = DigimonEvolutionEffectEnum.Default;
-
-                            if (client.Partner.Level < targetInfo.UnlockLevel)
-                            {
-                                client.Send(new DigimonEvolutionFailPacket());
-                                return;
-                            }
-
-                            client.Tamer.ConsumeXg(68);
-                            client.Tamer.ActiveEvolution.SetXg(2);
-                        }
+                        evoEffect = DigimonEvolutionEffectEnum.Default;
+                        if (client.Partner.Level < targetInfo.UnlockLevel) { client.Send(new DigimonEvolutionFailPacket()); return; }
+                        client.Tamer.ConsumeXg(68);
+                        client.Tamer.ActiveEvolution.SetXg(2);
                         break;
 
                     case EvolutionRankEnum.ChampionX:
-                        {
-                            evoEffect = DigimonEvolutionEffectEnum.Default;
-
-                            if (client.Partner.Level < targetInfo.UnlockLevel)
-                            {
-                                client.Send(new DigimonEvolutionFailPacket());
-                                return;
-                            }
-
-                            client.Tamer.ConsumeXg(92);
-                            client.Tamer.ActiveEvolution.SetXg(4);
-                        }
+                        evoEffect = DigimonEvolutionEffectEnum.Default;
+                        if (client.Partner.Level < targetInfo.UnlockLevel) { client.Send(new DigimonEvolutionFailPacket()); return; }
+                        client.Tamer.ConsumeXg(92);
+                        client.Tamer.ActiveEvolution.SetXg(4);
                         break;
 
                     case EvolutionRankEnum.UltimateX:
-                        {
-                            evoEffect = DigimonEvolutionEffectEnum.Default;
-
-                            if (client.Partner.Level < targetInfo.UnlockLevel)
-                            {
-                                client.Send(new DigimonEvolutionFailPacket());
-                                return;
-                            }
-
-                            client.Tamer.ConsumeXg(130);
-                            client.Tamer.ActiveEvolution.SetXg(6);
-                        }
+                        evoEffect = DigimonEvolutionEffectEnum.Default;
+                        if (client.Partner.Level < targetInfo.UnlockLevel) { client.Send(new DigimonEvolutionFailPacket()); return; }
+                        client.Tamer.ConsumeXg(130);
+                        client.Tamer.ActiveEvolution.SetXg(6);
                         break;
 
                     case EvolutionRankEnum.MegaX:
-                        {
-                            evoEffect = DigimonEvolutionEffectEnum.Default;
-
-                            if (client.Partner.Level < targetInfo.UnlockLevel)
-                            {
-                                client.Send(new DigimonEvolutionFailPacket());
-                                return;
-                            }
-
-                            client.Tamer.ConsumeXg(174);
-                            client.Tamer.ActiveEvolution.SetXg(8);
-                        }
+                        evoEffect = DigimonEvolutionEffectEnum.Default;
+                        if (client.Partner.Level < targetInfo.UnlockLevel) { client.Send(new DigimonEvolutionFailPacket()); return; }
+                        client.Tamer.ConsumeXg(174);
+                        client.Tamer.ActiveEvolution.SetXg(8);
                         break;
 
                     case EvolutionRankEnum.Capsule:
+                        evoEffect = DigimonEvolutionEffectEnum.Unknown;
+                        if (client.Partner.Level < targetInfo.UnlockLevel || !client.Tamer.ConsumeDs(75))
                         {
-                            evoEffect = DigimonEvolutionEffectEnum.Unknown;
-
-                            if (client.Partner.Level < targetInfo.UnlockLevel || !client.Tamer.ConsumeDs(75))
-                            {
-                                client.Send(new DigimonEvolutionFailPacket());
-                                return;
-                            }
-
-                            client.Tamer.ActiveEvolution.SetDs(3);
-                            client.Tamer.ActiveEvolution.SetXg(0);
+                            client.Send(new DigimonEvolutionFailPacket());
+                            return;
                         }
+                        client.Tamer.ActiveEvolution.SetDs(3);
+                        client.Tamer.ActiveEvolution.SetXg(0);
                         break;
 
                     case EvolutionRankEnum.JogressX:
                     case EvolutionRankEnum.BurstModeX:
-                        {
-                            evoEffect = DigimonEvolutionEffectEnum.BurstMode;
-
-                            if (client.Partner.Level < targetInfo.UnlockLevel)
-                            {
-                                client.Send(new DigimonEvolutionFailPacket());
-                                return;
-                            }
-
-                            client.Tamer.ConsumeXg(280);
-                            client.Tamer.ActiveEvolution.SetXg(10);
-                        }
+                        evoEffect = DigimonEvolutionEffectEnum.BurstMode;
+                        if (client.Partner.Level < targetInfo.UnlockLevel) { client.Send(new DigimonEvolutionFailPacket()); return; }
+                        client.Tamer.ConsumeXg(280);
+                        client.Tamer.ActiveEvolution.SetXg(10);
                         break;
 
                     case EvolutionRankEnum.Extra:
-                        {
-                            evoEffect = DigimonEvolutionEffectEnum.Default;
-
-                            if (client.Partner.Level < targetInfo.UnlockLevel || !client.Tamer.ConsumeDs(0))
-                            {
-                                client.Send(new DigimonEvolutionFailPacket());
-                                return;
-                            }
-
-                            client.Tamer.ActiveEvolution.SetDs(20);
-                            client.Tamer.ActiveEvolution.SetXg(0);
-                        }
+                        evoEffect = DigimonEvolutionEffectEnum.Default;
+                        if (client.Partner.Level < targetInfo.UnlockLevel) { client.Send(new DigimonEvolutionFailPacket()); return; }
+                        client.Tamer.ActiveEvolution.SetDs(20);
+                        client.Tamer.ActiveEvolution.SetXg(0);
                         break;
 
                     default:
-                        {
-                            _logger.Error($"EvolutionRankEnum not registered: {(EvolutionRankEnum)evolutionType}");
-                            client.Send(new DigimonEvolutionFailPacket());
-                            return;
-                        }
+                        _logger.Error("EvolutionRankEnum não registrado: {Rank}", (EvolutionRankEnum)evolutionType);
+                        client.Send(new DigimonEvolutionFailPacket());
+                        return;
                 }
 
                 if (client.Tamer.HasXai)
@@ -422,61 +316,57 @@ namespace DigitalWorldOnline.Game.PacketProcessors
                 }
             }
 
+            // logs
             if (evoStage == 8)
-                _logger.Verbose($"Tamer {client.Tamer.Name} devolved partner ({client.Partner.Id}:{client.Partner.Name}) " +
-                    $"from {client.Partner.CurrentType} to {evoLine[evoStage]?.Type}.");
+                _logger.Verbose("Tamer {Name} devolveu ({Id}:{Nm}) de {From} para {To}.",
+                    client.Tamer.Name, client.Partner.Id, client.Partner.Name, client.Partner.CurrentType, targetStage.Type);
             else
-                _logger.Verbose($"Tamer {client.Tamer.Name} evolved partner ({client.Partner.Id}:{client.Partner.Name}) " +
-                    $"from {client.Partner.CurrentType}:{client.Partner.BaseInfo.Name} to {evoLine[evoStage]?.Type}");
+                _logger.Verbose("Tamer {Name} evoluiu ({Id}:{Nm}) de {From} para {To}.",
+                    client.Tamer.Name, client.Partner.Id, client.Partner.Name, client.Partner.CurrentType, targetStage.Type);
 
-            client.Partner.UpdateCurrentType(evoLine[evoStage].Type);
+            // aplica tipo alvo
+            client.Partner.UpdateCurrentType(targetStage.Type);
+
+            // parar ride (client + outros)
+            if (client.Tamer.Riding)
+            {
+                client.Tamer.StopRideMode();
+                client.Send(new UpdateMovementSpeedPacket(client.Tamer));
+                client.Send(new RideModeStopPacket(client.Tamer.GeneralHandler, client.Partner.GeneralHandler));
+
+                var stopRidePkt = UtilitiesFunctions.GroupPackets(
+                    new UpdateMovementSpeedPacket(client.Tamer).Serialize(),
+                    new RideModeStopPacket(client.Tamer.GeneralHandler, client.Partner.GeneralHandler).Serialize()
+                );
+
+                if (client.DungeonMap)
+                    _dungeonServer.BroadcastForTargetTamers(client.TamerId, stopRidePkt);
+                else
+                    _mapServer.BroadcastForTargetTamers(client.TamerId, stopRidePkt);
+            }
+
+            // >>>> FIX PRINCIPAL: envia SEMPRE ao cliente e só depois aos outros
+            var evoPkt = new DigimonEvolutionSucessPacket(
+                client.Tamer.GeneralHandler,
+                client.Partner.GeneralHandler,
+                client.Partner.CurrentType,
+                evoEffect // <-- usa o efeito calculado acima!
+            ).Serialize();
+
+            // envia direto ao próprio cliente
+            client.Send(new DigimonEvolutionSucessPacket(
+                client.Tamer.GeneralHandler,
+                client.Partner.GeneralHandler,
+                client.Partner.CurrentType,
+                evoEffect));
+
+            // e agora apenas para os outros jogadores que o veem
+            if (client.DungeonMap)
+                _dungeonServer.BroadcastForTargetTamers(client.TamerId, evoPkt);
+            else
+                _mapServer.BroadcastForTargetTamers(client.TamerId, evoPkt);
 
             // ------------------------------------------------------------
-
-            if (client.DungeonMap)
-            {
-                if (client.Tamer.Riding)
-                {
-                    client.Tamer.StopRideMode();
-
-                    _dungeonServer.BroadcastForTamerViewsAndSelf(client.TamerId,
-                        new UpdateMovementSpeedPacket(client.Tamer).Serialize());
-
-                    _dungeonServer.BroadcastForTamerViewsAndSelf(client.TamerId,
-                        new RideModeStopPacket(client.Tamer.GeneralHandler, client.Partner.GeneralHandler).Serialize());
-                }
-
-                _dungeonServer.BroadcastForTamerViewsAndSelf(client.TamerId,
-                    new DigimonEvolutionSucessPacket(
-                        client.Tamer.GeneralHandler,
-                        client.Partner.GeneralHandler,
-                        client.Partner.CurrentType,
-                        evoEffect
-                    ).Serialize()
-                );
-            }
-            else
-            {
-                if (client.Tamer.Riding)
-                {
-                    client.Tamer.StopRideMode();
-
-                    _mapServer.BroadcastForTamerViewsAndSelf(client.TamerId,
-                        new UpdateMovementSpeedPacket(client.Tamer).Serialize());
-
-                    _mapServer.BroadcastForTamerViewsAndSelf(client.TamerId,
-                        new RideModeStopPacket(client.Tamer.GeneralHandler, client.Partner.GeneralHandler).Serialize());
-                }
-
-                _mapServer.BroadcastForTamerViewsAndSelf(client.TamerId,
-                    new DigimonEvolutionSucessPacket(
-                        client.Tamer.GeneralHandler,
-                        client.Partner.GeneralHandler,
-                        client.Partner.CurrentType,
-                        evoEffect
-                    ).Serialize()
-                );
-            }
 
             UpdateSkillCooldown(client);
 
@@ -501,49 +391,43 @@ namespace DigitalWorldOnline.Game.PacketProcessors
             if (currentTitleBuff != null)
             {
                 foreach (var buff in client.Tamer.Partner.BuffList.ActiveBuffs.Where(x => x.BuffId != currentTitleBuff.BuffId))
-                    buff.SetBuffInfo(_assets.BuffInfo.FirstOrDefault(x => x.SkillCode == buff.SkillId && buff.BuffInfo == null || x.DigimonSkillCode == buff.SkillId && buff.BuffInfo == null));
+                    buff.SetBuffInfo(_assets.BuffInfo.FirstOrDefault(x =>
+                        (x.SkillCode == buff.SkillId && buff.BuffInfo == null) ||
+                        (x.DigimonSkillCode == buff.SkillId && buff.BuffInfo == null)));
 
                 if (client.Tamer.Partner.BuffList.TamerBaseSkill() != null)
                 {
                     var buffToApply = client.Tamer.Partner.BuffList.Buffs
-                                .Where(x => x.Duration == 0 && x.BuffId != currentTitleBuff.BuffId)
-                                .ToList();
+                        .Where(x => x.Duration == 0 && x.BuffId != currentTitleBuff.BuffId)
+                        .ToList();
 
-
-                    buffToApply.ForEach(buffToApply =>
+                    buffToApply.ForEach(b =>
                     {
+                        var add = new AddBuffPacket(client.Tamer.Partner.GeneralHandler, b.BuffId, b.SkillId, (short)b.TypeN, 0).Serialize();
                         if (client.DungeonMap)
-                        {
-                            _dungeonServer.BroadcastForTamerViewsAndSelf(client.Tamer.Id, new AddBuffPacket(client.Tamer.Partner.GeneralHandler, buffToApply.BuffId, buffToApply.SkillId, (short)buffToApply.TypeN, 0).Serialize());
-                        }
+                            _dungeonServer.BroadcastForTamerViewsAndSelf(client.Tamer.Id, add);
                         else
-                        {
-                            _mapServer.BroadcastForTamerViewsAndSelf(client.Tamer.Id, new AddBuffPacket(client.Tamer.Partner.GeneralHandler, buffToApply.BuffId, buffToApply.SkillId, (short)buffToApply.TypeN, 0).Serialize());
-                        }
+                            _mapServer.BroadcastForTamerViewsAndSelf(client.Tamer.Id, add);
                     });
-
                 }
             }
             else
             {
                 foreach (var buff in client.Tamer.Partner.BuffList.ActiveBuffs)
-                    buff.SetBuffInfo(_assets.BuffInfo.FirstOrDefault(x => x.SkillCode == buff.SkillId && buff.BuffInfo == null || x.DigimonSkillCode == buff.SkillId && buff.BuffInfo == null));
+                    buff.SetBuffInfo(_assets.BuffInfo.FirstOrDefault(x =>
+                        (x.SkillCode == buff.SkillId && buff.BuffInfo == null) ||
+                        (x.DigimonSkillCode == buff.SkillId && buff.BuffInfo == null)));
 
                 if (client.Tamer.Partner.BuffList.TamerBaseSkill() != null)
                 {
                     var buffToApply = client.Tamer.Partner.BuffList.Buffs.Where(x => x.Duration == 0).ToList();
-
-                    buffToApply.ForEach(buffToApply =>
+                    buffToApply.ForEach(b =>
                     {
+                        var add = new AddBuffPacket(client.Tamer.Partner.GeneralHandler, b.BuffId, b.SkillId, (short)b.TypeN, 0).Serialize();
                         if (client.DungeonMap)
-                        {
-                            _dungeonServer.BroadcastForTamerViewsAndSelf(client.Tamer.Id, new AddBuffPacket(client.Tamer.Partner.GeneralHandler, buffToApply.BuffId, buffToApply.SkillId, (short)buffToApply.TypeN, 0).Serialize());
-                        }
+                            _dungeonServer.BroadcastForTamerViewsAndSelf(client.Tamer.Id, add);
                         else
-                        {
-                            _mapServer.BroadcastForTamerViewsAndSelf(client.Tamer.Id, new AddBuffPacket(client.Tamer.Partner.GeneralHandler, buffToApply.BuffId, buffToApply.SkillId, (short)buffToApply.TypeN, 0).Serialize());
-
-                        }
+                            _mapServer.BroadcastForTamerViewsAndSelf(client.Tamer.Id, add);
                     });
                 }
             }
@@ -552,24 +436,17 @@ namespace DigitalWorldOnline.Game.PacketProcessors
             client.Send(new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory));
 
             // -- PARTY -------------------------------------------
-
             var party = _partyManager.FindParty(client.TamerId);
-
             if (party != null)
             {
                 party.UpdateMember(party[client.TamerId], client.Tamer);
 
                 foreach (var target in party.Members.Values)
                 {
-                    var targetClient = _mapServer.FindClientByTamerId(target.Id);
-
-                    if (targetClient == null) targetClient = _dungeonServer.FindClientByTamerId(target.Id);
-
-                    if (targetClient == null) continue;
-
-                    if (target.Id != client.Tamer.Id) targetClient.Send(new PartyMemberInfoPacket(party[client.TamerId]));
+                    var targetClient = _mapServer.FindClientByTamerId(target.Id) ?? _dungeonServer.FindClientByTamerId(target.Id);
+                    if (targetClient == null || target.Id == client.Tamer.Id) continue;
+                    targetClient.Send(new PartyMemberInfoPacket(party[client.TamerId]));
                 }
-
             }
 
             await _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
@@ -581,45 +458,35 @@ namespace DigitalWorldOnline.Game.PacketProcessors
 
         private void UpdateSkillCooldown(GameClient client)
         {
+            if (!client.Tamer.Partner.HasActiveSkills())
+                return;
 
-            if (client.Tamer.Partner.HasActiveSkills())
+            foreach (var evolution in client.Tamer.Partner.Evolutions)
             {
-
-                foreach (var evolution in client.Tamer.Partner.Evolutions)
+                foreach (var skill in evolution.Skills)
                 {
-                    foreach (var skill in evolution.Skills)
-                    {
-                        if (skill.Duration > 0 && skill.Expired)
-                        {
-                            skill.ResetCooldown();
-                        }
-                    }
-
-                    _sender.Send(new UpdateEvolutionCommand(evolution));
+                    if (skill.Duration > 0 && skill.Expired)
+                        skill.ResetCooldown();
                 }
 
-                List<int> SkillIds = new List<int>(5);
-                var packetEvolution = client.Tamer.Partner.Evolutions.FirstOrDefault(x => x.Type == client.Tamer.Partner.CurrentType);
+                _sender.Send(new UpdateEvolutionCommand(evolution));
+            }
 
-                if (packetEvolution != null)
+            List<int> skillIds = new List<int>(5);
+            var packetEvolution = client.Tamer.Partner.Evolutions.FirstOrDefault(x => x.Type == client.Tamer.Partner.CurrentType);
+
+            if (packetEvolution != null)
+            {
+                var slot = -1;
+                foreach (var item in packetEvolution.Skills)
                 {
-
-                    var slot = -1;
-
-                    foreach (var item in packetEvolution.Skills)
-                    {
-                        slot++;
-
-                        var skillInfo = _assets.DigimonSkillInfo.FirstOrDefault(x => x.Type == client.Partner.CurrentType && x.Slot == slot);
-                        if (skillInfo != null)
-                        {
-                            SkillIds.Add(skillInfo.SkillId);
-                        }
-                    }
-
-                    client?.Send(new SkillUpdateCooldownPacket(client.Tamer.Partner.GeneralHandler, client.Tamer.Partner.CurrentType, packetEvolution, SkillIds));
-
+                    slot++;
+                    var skillInfo = _assets.DigimonSkillInfo.FirstOrDefault(x => x.Type == client.Partner.CurrentType && x.Slot == slot);
+                    if (skillInfo != null)
+                        skillIds.Add(skillInfo.SkillId);
                 }
+
+                client?.Send(new SkillUpdateCooldownPacket(client.Tamer.Partner.GeneralHandler, client.Tamer.Partner.CurrentType, packetEvolution, skillIds));
             }
         }
     }
