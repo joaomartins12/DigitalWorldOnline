@@ -9,8 +9,6 @@ using DigitalWorldOnline.Commons.Packets.Chat;
 using DigitalWorldOnline.Commons.Packets.Items;
 using MediatR;
 using Serilog;
-using System;
-using System.Linq;
 
 namespace DigitalWorldOnline.Game.PacketProcessors
 {
@@ -36,73 +34,53 @@ namespace DigitalWorldOnline.Game.PacketProcessors
         {
             var packet = new GamePacketReader(packetData);
 
-            // O protocolo envia como short
-            short questId = packet.ReadShort();
+            var questId = packet.ReadShort();
 
-            try
+            if (client.Tamer.Progress.AcceptQuest(questId))
             {
-                // 1) Marca como aceita no progresso (retorna false se já aceita/cheia/indisponível)
-                if (!client.Tamer.Progress.AcceptQuest(questId))
-                {
-                    client.Send(new SystemMessagePacket($"Quest {questId} cannot be accepted right now."));
-                    return;
-                }
-
-                // 2) Carrega a configuração da quest
-                var questInfo = _assets.Quest.FirstOrDefault(x => x.QuestId == (int)questId);
+                var questInfo = _assets.Quest.FirstOrDefault(x => x.QuestId == questId);
                 if (questInfo == null)
                 {
-                    _logger.Error("QuestAccept: unknown quest id {QuestId}.", questId);
+                    _logger.Error($"Unknown quest id {questId}.");
                     client.Send(new SystemMessagePacket($"Unknown quest id {questId}."));
                     client.Tamer.Progress.RemoveQuest(questId);
                     return;
                 }
 
-                // 3) Entrega dos suprimentos da quest (se houver). Se falhar, desfaz a aceitação.
-                foreach (var supply in questInfo.QuestSupplies)
+                foreach (var questSupply in questInfo.QuestSupplies)
                 {
-                    var info = _assets.ItemInfo.FirstOrDefault(x => x.ItemId == supply.ItemId);
-                    if (info == null)
+                    var item = new ItemModel();
+                    item.SetItemId(questSupply.ItemId);
+                    item.SetAmount(questSupply.Amount);
+                    item.SetItemInfo(_assets.ItemInfo.FirstOrDefault(x => x.ItemId == item.ItemId));
+
+                    if (item.ItemInfo == null)
                     {
-                        _logger.Error("QuestAccept: item info not found for item {ItemId} (quest {QuestId}).", supply.ItemId, questId);
-                        client.Send(new SystemMessagePacket($"Item information not found for item {supply.ItemId}."));
+                        _logger.Error($"Item information not found for item {item.ItemId}.");
+                        client.Send(new SystemMessagePacket($"Item information not found for item {item.ItemId}."));
                         client.Tamer.Progress.RemoveQuest(questId);
                         return;
                     }
 
-                    var item = new ItemModel();
-                    item.SetItemId(supply.ItemId);
-                    item.SetAmount(supply.Amount);
-                    item.SetItemInfo(info);
-
-                    // tenta adicionar (respeita espaço no inventário)
-                    var toAdd = (ItemModel)item.Clone();
-                    if (!client.Tamer.Inventory.AddItem(toAdd))
+                    var itemClone = (ItemModel)item.Clone();
+                    if (!client.Tamer.Inventory.AddItem(itemClone))
                     {
                         client.Send(new PickItemFailPacket(PickItemFailReasonEnum.InventoryFull));
                         client.Tamer.Progress.RemoveQuest(questId);
                         return;
                     }
+
                 }
 
-                _logger.Verbose("QuestAccept: character {TamerId} accepted quest {QuestId}.", client.TamerId, questId);
-                foreach (var s in questInfo.QuestSupplies)
-                    _logger.Verbose("QuestAccept: character {TamerId} received supply {ItemId} x{Amount} for quest {QuestId}.",
-                        client.TamerId, s.ItemId, s.Amount, questId);
+                _logger.Verbose($"Character {client.TamerId} accepted quest {questId}.");
 
-                // 4) Persiste inventário e progresso
+                foreach (var questSupply in questInfo.QuestSupplies)
+                {
+                    _logger.Verbose($"Character {client.TamerId} received quest {questId} supply item {questSupply.ItemId} x{questSupply.Amount}.");
+                }
+
                 await _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
                 await _sender.Send(new AddCharacterProgressCommand(client.Tamer.Progress));
-
-                // 5) Refresh de UI
-                client.Send(new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory));
-            }
-            catch (Exception ex)
-            {
-                // Em caso de exceção, garante que a quest não fica marcada como aceita
-                _logger.Error(ex, "QuestAccept: exceção ao aceitar quest {QuestId} (tamer {TamerId}).", questId, client?.TamerId);
-                client?.Tamer?.Progress?.RemoveQuest(questId);
-                client?.Send(new SystemMessagePacket($"Failed to accept quest {questId}."));
             }
         }
     }

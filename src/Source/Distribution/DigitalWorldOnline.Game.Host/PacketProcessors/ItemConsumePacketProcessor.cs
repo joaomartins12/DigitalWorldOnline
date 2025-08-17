@@ -978,197 +978,84 @@ namespace DigitalWorldOnline.Game.PacketProcessors
 
         private async Task IncreaseArchiveSlots(GameClient client, short itemSlot, ItemModel targetItem)
         {
-            var itemsToUse = Math.Max(0, targetItem.Amount);
-            if (itemsToUse == 0)
-            {
-                client.Send(new ItemConsumeFailPacket(itemSlot, targetItem.ItemInfo.Type));
-                return;
-            }
+            client.Tamer.DigimonArchive.AddSlot();
 
-            var opened = 0;
+            _logger.Verbose($"Character {client.TamerId} used {targetItem.ItemId} to expand digimon archive slots to {client.Tamer.DigimonArchive.Slots}.");
 
-            for (int i = 0; i < itemsToUse; i++)
-            {
-                // guarda contagem antes
-                var beforeCount = client.Tamer.DigimonArchive.DigimonArchives.Count;
+            client.Tamer.Inventory.RemoveOrReduceItem(targetItem, 1);
 
-                // tenta adicionar um slot
-                client.Tamer.DigimonArchive.AddSlot();
-
-                // se não aumentou, chegou no limite
-                if (client.Tamer.DigimonArchive.DigimonArchives.Count == beforeCount)
-                    break;
-
-                // novo slot é o último da lista
-                var newSlot = client.Tamer.DigimonArchive.DigimonArchives.Last();
-
-                await _sender.Send(new CreateCharacterDigimonArchiveSlotCommand(
-                    newSlot,
+            await _sender.Send(new UpdateItemCommand(targetItem));
+            await _sender.Send(new CreateCharacterDigimonArchiveSlotCommand(
+                    client.Tamer.DigimonArchive.DigimonArchives.Last(),
                     client.Tamer.DigimonArchive.Id
-                ));
+                )
+            );
 
-                opened++;
-
-                _logger.Verbose(
-                    "Character {TamerId} used {ItemId} to expand digimon archive slot #{Opened} (total now {Slots}).",
-                    client.TamerId, targetItem.ItemId, opened, client.Tamer.DigimonArchive.Slots
-                );
-            }
-
-            if (opened == 0)
-            {
-                client.Send(new SystemMessagePacket("Digimon Archive is already at maximum capacity."));
-                client.Send(new ItemConsumeFailPacket(itemSlot, targetItem.ItemInfo.Type));
-                return;
-            }
-
-            // consome exatamente a quantidade que resultou em slots abertos
-            client.Tamer.Inventory.RemoveOrReduceItem(targetItem, opened, itemSlot);
-
-            // persiste o consumo/estado do inventário
-            await _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
-
-            // resposta e UI
-            client.Send(UtilitiesFunctions.GroupPackets(
-                new ItemConsumeSuccessPacket(client.Tamer.GeneralHandler, itemSlot).Serialize(),
-                new DigimonArchiveLoadPacket(client.Tamer.DigimonArchive).Serialize(),
-                new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory).Serialize()
-            ));
-
-            if (opened < itemsToUse)
-                client.Send(new SystemMessagePacket($"Opened {opened} archive slot(s). Archive reached its limit."));
-            else
-                client.Send(new SystemMessagePacket($"Opened {opened} archive slot(s) successfully."));
+            client.Send(
+                UtilitiesFunctions.GroupPackets(
+                    new ItemConsumeSuccessPacket(client.Tamer.GeneralHandler, itemSlot).Serialize(),
+                    new DigimonArchiveLoadPacket(client.Tamer.DigimonArchive).Serialize(),
+                    new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory).Serialize()
+                )
+            );
         }
 
         private async Task IncreaseDigimonSlots(GameClient client, short itemSlot, ItemModel targetItem)
         {
             client.Tamer.AddDigimonSlots();
 
-            _logger.Verbose("Character {TamerId} used {ItemId} to expand digimon slots to {Slots}.",
-                client.TamerId, targetItem.ItemId, client.Tamer.DigimonSlots);
+            _logger.Verbose($"Character {client.TamerId} used {targetItem.ItemId} to expand digimon slots to {client.Tamer.DigimonSlots}.");
 
             client.Tamer.Inventory.RemoveOrReduceItem(targetItem, 1);
 
             await _sender.Send(new UpdateCharacterDigimonSlotsCommand(client.Tamer.Id, client.Tamer.DigimonSlots));
             await _sender.Send(new UpdateItemCommand(targetItem));
 
-            client.Send(UtilitiesFunctions.GroupPackets(
-                new ItemConsumeSuccessPacket(client.Tamer.GeneralHandler, itemSlot).Serialize(),
-                new UpdateDigimonSlotsPacket(client.Tamer.DigimonSlots).Serialize(),
-                new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory).Serialize()
-            ));
+            client.Send(
+                UtilitiesFunctions.GroupPackets(
+                    new ItemConsumeSuccessPacket(client.Tamer.GeneralHandler, itemSlot).Serialize(),
+                    new UpdateDigimonSlotsPacket(client.Tamer.DigimonSlots).Serialize(),
+                    new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory).Serialize()
+                )
+            );
         }
 
         private async Task IncreaseWarehouseSlots(GameClient client, short itemSlot, ItemModel targetItem)
         {
-            // quantidade disponível no stack
-            var itemsToUse = Math.Max(0, targetItem.Amount);
-            if (itemsToUse == 0)
-            {
-                client.Send(new ItemConsumeFailPacket(itemSlot, targetItem.ItemInfo.Type));
-                return;
-            }
+            var newSlot = client.Tamer.Warehouse.AddSlot();
 
-            var opened = 0;
-            var createdSlots = new List<ItemModel>(); // ajuste o tipo se AddSlot() retornar outro modelo
+            _logger.Verbose($"Character {client.TamerId} used {targetItem.ItemId} to expand warehouse slots to {client.Tamer.Warehouse.Size}.");
 
-            // tenta abrir um slot por item, até chegar ao limite do warehouse
-            for (int i = 0; i < itemsToUse; i++)
-            {
-                var newSlot = client.Tamer.Warehouse.AddSlot();
-                if (newSlot == null)
-                    break;
+            client.Tamer.Inventory.RemoveOrReduceItem(targetItem, 1);
 
-                createdSlots.Add(newSlot);
-                opened++;
+            await _sender.Send(new UpdateItemCommand(targetItem));
+            await _sender.Send(new AddInventorySlotCommand(newSlot));
 
-                _logger.Verbose(
-                    "Character {TamerId} used {ItemId} to expand warehouse slot #{Opened} (size now {Size}).",
-                    client.TamerId, targetItem.ItemId, opened, client.Tamer.Warehouse.Size
-                );
-            }
-
-            if (opened == 0)
-            {
-                client.Send(new SystemMessagePacket("Warehouse is already at maximum capacity."));
-                client.Send(new ItemConsumeFailPacket(itemSlot, targetItem.ItemInfo.Type));
-                return;
-            }
-
-            // consome exatamente a quantidade que resultou em slots abertos
-            client.Tamer.Inventory.RemoveOrReduceItem(targetItem, opened, itemSlot);
-
-            // persiste os novos slots
-            foreach (var slot in createdSlots)
-                await _sender.Send(new AddInventorySlotCommand(slot));
-
-            // persiste o consumo do item (inventário)
-            await _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
-
-            // feedback e refresh de UI
-            client.Send(UtilitiesFunctions.GroupPackets(
-                new ItemConsumeSuccessPacket(client.Tamer.GeneralHandler, itemSlot).Serialize(),
-                new LoadInventoryPacket(client.Tamer.Warehouse, InventoryTypeEnum.Warehouse).Serialize()
-            ));
-
-            if (opened < itemsToUse)
-                client.Send(new SystemMessagePacket($"Opened {opened} warehouse slot(s). Warehouse reached its limit."));
-            else
-                client.Send(new SystemMessagePacket($"Opened {opened} warehouse slot(s) successfully."));
+            client.Send(
+                UtilitiesFunctions.GroupPackets(
+                    new ItemConsumeSuccessPacket(client.Tamer.GeneralHandler, itemSlot).Serialize(),
+                    new LoadInventoryPacket(client.Tamer.Warehouse, InventoryTypeEnum.Warehouse).Serialize()
+                )
+            );
         }
 
         private async Task IncreaseInventorySlots(GameClient client, short itemSlot, ItemModel targetItem)
         {
-            var itemsToUse = Math.Max(0, targetItem.Amount);
-            if (itemsToUse == 0)
-            {
-                client.Send(new ItemConsumeFailPacket(itemSlot, targetItem.ItemInfo.Type));
-                return;
-            }
+            var newSlot = client.Tamer.Inventory.AddSlot();
 
-            var opened = 0;
-            var createdSlots = new List<ItemModel>(); // <- tipagem correta
+            _logger.Verbose($"Character {client.TamerId} used {targetItem.ItemId} to expand inventory slots to {client.Tamer.Inventory.Size}.");
 
-            for (int i = 0; i < itemsToUse; i++)
-            {
-                var newSlot = client.Tamer.Inventory.AddSlot(); // deve devolver ItemModel (como no teu código original)
-                if (newSlot == null)
-                    break;
+            client.Tamer.Inventory.RemoveOrReduceItem(targetItem, 1);
 
-                createdSlots.Add(newSlot);
-                opened++;
+            await _sender.Send(new UpdateItemCommand(targetItem));
+            await _sender.Send(new AddInventorySlotCommand(newSlot));
 
-                _logger.Verbose("Character {TamerId} used {ItemId} to expand inventory slot #{Opened} (size now {Size}).",
-                    client.TamerId, targetItem.ItemId, opened, client.Tamer.Inventory.Size);
-            }
-
-            if (opened == 0)
-            {
-                client.Send(new SystemMessagePacket("Inventory is already at maximum capacity."));
-                client.Send(new ItemConsumeFailPacket(itemSlot, targetItem.ItemInfo.Type));
-                return;
-            }
-
-            // consome exatamente o número de itens que resultou em slots abertos
-            client.Tamer.Inventory.RemoveOrReduceItem(targetItem, opened, itemSlot);
-
-            // persiste os slots criados
-            foreach (var slot in createdSlots)
-                await _sender.Send(new AddInventorySlotCommand(slot));
-
-            // persiste e atualiza UI
-            await _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
-
-            client.Send(UtilitiesFunctions.GroupPackets(
-                new ItemConsumeSuccessPacket(client.Tamer.GeneralHandler, itemSlot).Serialize(),
-                new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory).Serialize()
-            ));
-
-            if (opened < itemsToUse)
-                client.Send(new SystemMessagePacket($"Opened {opened} slot(s). Inventory reached its limit."));
-            else
-                client.Send(new SystemMessagePacket($"Opened {opened} slot(s) successfully."));
+            client.Send(
+                UtilitiesFunctions.GroupPackets(
+                    new ItemConsumeSuccessPacket(client.Tamer.GeneralHandler, itemSlot).Serialize(),
+                    new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory).Serialize()
+                )
+            );
         }
 
         private async Task ContainerItem(GameClient client, short itemSlot, ItemModel targetItem)

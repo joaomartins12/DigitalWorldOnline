@@ -15,10 +15,6 @@ using DigitalWorldOnline.Game.Managers;
 using DigitalWorldOnline.GameHost;
 using MediatR;
 using Serilog;
-using System;
-using System.Linq;
-using System.Collections.Generic;
-using System.Threading.Tasks;
 
 namespace DigitalWorldOnline.Game.PacketProcessors
 {
@@ -52,115 +48,87 @@ namespace DigitalWorldOnline.Game.PacketProcessors
         public async Task Process(GameClient client, byte[] packetData)
         {
             var packet = new GamePacketReader(packetData);
-            short questId = packet.ReadShort();
 
-            try
+            var questId = packet.ReadShort();
+
+            var questInfo = _assets.Quest.FirstOrDefault(x => x.QuestId == questId);
+
+            if (questInfo == null)
             {
-                // Confere se a quest existe
-                var questInfo = _assets.Quest.FirstOrDefault(x => x.QuestId == questId);
-                if (questInfo == null)
+                _logger.Error($"Unknown quest id {questId}.");
+                client.Send(new SystemMessagePacket($"Unknown quest id {questId}."));
+                client.Tamer.Progress.RemoveQuest(questId);
+                return;
+            }
+
+            _logger.Verbose($"Character {client.TamerId} delivered quest {questId}.");
+
+            DeliverItems(client, questId, questInfo);
+            ReturnSupplies(client, questId, questInfo);
+            QuestRewards(client, questInfo);
+
+            var evolutionQuest = _assets.EvolutionInfo.FirstOrDefault(x => x.Type == client.Partner.BaseType)?
+               .Lines.FirstOrDefault(y => y.UnlockQuestId == questId && y.UnlockItemSection == 0);
+
+            if (evolutionQuest != null)
+            {
+                var targetEvolution = client.Tamer.Partner.Evolutions[evolutionQuest.SlotLevel - 1];
+
+                if (targetEvolution != null)
                 {
-                    _logger.Error("QuestDeliver: unknown quest id {QuestId}.", questId);
-                    client.Send(new SystemMessagePacket($"Unknown quest id {questId}."));
-                    client.Tamer.Progress.RemoveQuest(questId); // desfaz se estiver marcada
-                    return;
-                }
+                    targetEvolution.Unlock();
 
-                // Confere se a quest está ativa no progresso do jogador
-                var active = client.Tamer.Progress.InProgressQuestData.FirstOrDefault(x => x.QuestId == questId);
-                if (active == null)
-                {
-                    client.Send(new SystemMessagePacket($"Quest {questId} is not active."));
-                    return;
-                }
+                    await _sender.Send(new UpdateEvolutionCommand(targetEvolution));
 
-                _logger.Verbose("Character {TamerId} delivered quest {QuestId}.", client.TamerId, questId);
+                    _logger.Verbose($"Character {client.TamerId} unlocked evolution {targetEvolution.Type} on quest {questId} completion.");
 
-                // 1) Valida e remove objetivos de coleta
-                if (!TryDeliverGoalItems(client, questId, questInfo))
-                    return;
+                    var evoInfo = _assets.EvolutionInfo.FirstOrDefault(x => x.Type == client.Partner.BaseType)?.Lines.FirstOrDefault(x => x.Type == targetEvolution.Type);
 
-                // 2) Remove suprimentos de quest entregues (se a tua lógica exigir devolução)
-                if (!TryReturnSupplies(client, questId, questInfo))
-                    return;
+                    var encyclopedia = client.Tamer.Encyclopedia.First(x => x.DigimonEvolutionId == evoInfo.EvolutionId);
 
-                // 3) Dá recompensas
-                await GiveQuestRewards(client, questInfo);
-
-                // 4) Desbloqueio de evolução por quest (quando não exige item de unlock)
-                var evolutionQuest = _assets.EvolutionInfo.FirstOrDefault(x => x.Type == client.Partner.BaseType)?
-                    .Lines.FirstOrDefault(y => y.UnlockQuestId == questId && y.UnlockItemSection == 0);
-
-                if (evolutionQuest != null)
-                {
-                    var targetEvolution = client.Tamer.Partner.Evolutions[evolutionQuest.SlotLevel - 1];
-                    if (targetEvolution != null)
+                    if (encyclopedia != null)
                     {
-                        targetEvolution.Unlock();
-                        await _sender.Send(new UpdateEvolutionCommand(targetEvolution));
+                        var encyclopediaEvolution = encyclopedia.Evolutions.First(x => x.DigimonBaseType == targetEvolution.Type);
 
-                        _logger.Verbose("Character {TamerId} unlocked evolution {Type} on quest {QuestId} completion.",
-                            client.TamerId, targetEvolution.Type, questId);
+                        encyclopediaEvolution.Unlock();
 
-                        var evoInfo = _assets.EvolutionInfo
-                            .FirstOrDefault(x => x.Type == client.Partner.BaseType)?
-                            .Lines.FirstOrDefault(x => x.Type == targetEvolution.Type);
+                        await _sender.Send(new UpdateCharacterEncyclopediaEvolutionsCommand(encyclopediaEvolution));
 
-                        var encyclopedia = client.Tamer.Encyclopedia.FirstOrDefault(x => x.DigimonEvolutionId == evoInfo?.EvolutionId);
-                        if (encyclopedia != null)
+                        int LockedEncyclopediaCount = encyclopedia.Evolutions.Count(x => x.IsUnlocked == false);
+
+                        if (LockedEncyclopediaCount <= 0)
                         {
-                            var encEvo = encyclopedia.Evolutions.FirstOrDefault(x => x.DigimonBaseType == targetEvolution.Type);
-                            if (encEvo != null)
-                            {
-                                encEvo.Unlock();
-                                await _sender.Send(new UpdateCharacterEncyclopediaEvolutionsCommand(encEvo));
-
-                                int lockedCount = encyclopedia.Evolutions.Count(x => !x.IsUnlocked);
-                                if (lockedCount <= 0)
-                                {
-                                    encyclopedia.SetRewardAllowed();
-                                    await _sender.Send(new UpdateCharacterEncyclopediaCommand(encyclopedia));
-                                }
-                            }
+                            encyclopedia.SetRewardAllowed();
+                            await _sender.Send(new UpdateCharacterEncyclopediaCommand(encyclopedia));
                         }
                     }
                 }
-
-                // 5) Marca como completa nos bitflags
-                UpdateQuestCompleteBit(client, questId);
-
-                // 6) Remove do progresso ativo e persiste
-                Guid? removedId = client.Tamer.Progress.RemoveQuest(questId);
-
-                // UI – inventário/recursos
-                client.Send(new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory));
-
-                if (removedId.HasValue)
-                {
-                    await _sender.Send(new RemoveActiveQuestCommand(removedId.Value));
-                }
-
-                await _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
-                await _sender.Send(new UpdateItemListBitsCommand(client.Tamer.Inventory.Id, client.Tamer.Inventory.Bits));
-                await _sender.Send(new UpdateCharacterProgressCompleteCommand(client.Tamer.Progress));
             }
-            catch (Exception ex)
-            {
-                _logger.Error(ex, "QuestDeliver: exception delivering quest {QuestId} (tamer {TamerId}).", questId, client?.TamerId);
-                client.Send(new SystemMessagePacket($"Failed to deliver quest {questId}."));
-            }
+
+            UpdateProgressValue(client, questId);
+
+            var questToUpdate = client.Tamer.Progress.InProgressQuestData.FirstOrDefault(x => x.QuestId == questId);
+
+            var id = client.Tamer.Progress.RemoveQuest(questId);
+
+            client.Send(new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory));
+
+            await _sender.Send(new RemoveActiveQuestCommand(id));
+            await _sender.Send(new UpdateItemsCommand(client.Tamer.Inventory));
+            await _sender.Send(new UpdateItemListBitsCommand(client.Tamer.Inventory));
+            await _sender.Send(new UpdateCharacterProgressCompleteCommand(client.Tamer.Progress));
         }
 
-        // ------------------------------------------------------------
-        // Helpers de bitflag de conclusão
-        // ------------------------------------------------------------
         private int GetBitValue(int[] array, int x)
         {
             int arrIDX = x / 32;
             int bitPosition = x % 32;
 
             if (arrIDX >= array.Length)
-                throw new ArgumentOutOfRangeException(nameof(array), "Invalid array index");
+            {
+                _logger.Error($"Invalid array index.");
+                throw new ArgumentOutOfRangeException("Invalid array index");
+            }
 
             int value = array[arrIDX];
             return (value >> bitPosition) & 1;
@@ -172,238 +140,249 @@ namespace DigitalWorldOnline.Game.PacketProcessors
             int bitPosition = x % 32;
 
             if (arrIDX >= array.Length)
-                throw new ArgumentOutOfRangeException(nameof(array), "Invalid array index");
+            {
+                _logger.Error($"Invalid array index on set bit value.");
+                throw new ArgumentOutOfRangeException("Invalid array index on set bit value.");
+            }
 
             if (bitValue != 0 && bitValue != 1)
-                throw new ArgumentException("Invalid bit value. Only 0 or 1 are allowed.", nameof(bitValue));
+            {
+                _logger.Error($"Invalid bit value. Only 0 or 1 are allowed.");
+                throw new ArgumentException("Invalid bit value. Only 0 or 1 are allowed.");
+            }
 
             int value = array[arrIDX];
             int mask = 1 << bitPosition;
 
-            array[arrIDX] = (bitValue == 1) ? (value | mask) : (value & ~mask);
+            if (bitValue == 1)
+                array[arrIDX] = value | mask;
+            else
+                array[arrIDX] = value & ~mask;
         }
 
-        private void UpdateQuestCompleteBit(GameClient client, short questId)
+        private void UpdateQuestComplete(GameClient client, int qIDX)
         {
-            int current = GetBitValue(client.Tamer.Progress.CompletedDataValue, questId - 1);
-            if (current == 0)
-                SetBitValue(client.Tamer.Progress.CompletedDataValue, questId - 1, 1);
+            int intValue = GetBitValue(client.Tamer.Progress.CompletedDataValue, qIDX - 1);
+
+            if (intValue == 0)
+                SetBitValue(client.Tamer.Progress.CompletedDataValue, qIDX - 1, 1);
         }
 
-        // ------------------------------------------------------------
-        // Remoção de Itens (objetivos / suprimentos)
-        // ------------------------------------------------------------
-
-        private bool TryDeliverGoalItems(GameClient client, short questId, QuestAssetModel questInfo)
+        private void UpdateProgressValue(GameClient client, short questId)
         {
-            foreach (var goal in questInfo.QuestGoals.Where(x => x.GoalType == QuestGoalTypeEnum.LootItem))
+            UpdateQuestComplete(client, questId);
+        }
+
+        private void DeliverItems(GameClient client, short questId, QuestAssetModel questInfo)
+        {
+            foreach (var questGoal in questInfo.QuestGoals.Where(x => x.GoalType == QuestGoalTypeEnum.LootItem))
             {
-                int remain = goal.GoalAmount;
-                var info = _assets.ItemInfo.FirstOrDefault(x => x.ItemId == goal.GoalId);
-                if (info == null)
+                var item = new ItemModel();
+                item.SetItemId(questGoal.GoalId);
+                item.SetAmount(questGoal.GoalAmount);
+                item.SetItemInfo(_assets.ItemInfo.FirstOrDefault(x => x.ItemId == item.ItemId));
+
+                if (item.ItemInfo == null)
                 {
-                    _logger.Error("QuestDeliver: item info not found for goal item {ItemId} (quest {QuestId}).", goal.GoalId, questId);
-                    client.Send(new SystemMessagePacket($"Item information not found for item {goal.GoalId}."));
-                    return false;
+                    _logger.Error($"Item information not found for item {item.ItemId}.");
+                    client.Send(new SystemMessagePacket($"Item information not found for item {item.ItemId}."));
                 }
-
-                // Remove por pilhas até atingir o total
-                while (remain > 0)
+                else
                 {
-                    var stack = client.Tamer.Inventory.FindItemById(goal.GoalId);
-                    if (stack == null || stack.Amount <= 0)
-                    {
-                        client.Send(new SystemMessagePacket($"You don't have enough items for quest {questId}."));
-                        return false;
-                    }
-
-                    int take = Math.Min(stack.Amount, remain);
-                    client.Tamer.Inventory.RemoveOrReduceItem(stack, take, stack.Slot);
-                    remain -= take;
+                    _logger.Verbose($"Character {client.TamerId} delivered quest {questId} goal item {questGoal.GoalId} x{questGoal.GoalAmount}.");
+                    client.Tamer.Inventory.RemoveOrReduceItem(item, questGoal.GoalAmount);
                 }
-
-                _logger.Verbose("Character {TamerId} delivered quest {QuestId} goal item {ItemId} x{Amount}.",
-                    client.TamerId, questId, goal.GoalId, goal.GoalAmount);
             }
-
-            return true;
         }
 
-        private bool TryReturnSupplies(GameClient client, short questId, QuestAssetModel questInfo)
+        private void ReturnSupplies(GameClient client, short questId, QuestAssetModel questInfo)
         {
-            foreach (var supply in questInfo.QuestSupplies)
+            foreach (var questSupply in questInfo.QuestSupplies)
             {
-                int remain = supply.Amount;
-                var info = _assets.ItemInfo.FirstOrDefault(x => x.ItemId == supply.ItemId);
-                if (info == null)
+                var item = new ItemModel();
+                item.SetItemId(questSupply.ItemId);
+                item.SetAmount(questSupply.Amount);
+                item.SetItemInfo(_assets.ItemInfo.FirstOrDefault(x => x.ItemId == item.ItemId));
+
+                if (item.ItemInfo == null)
                 {
-                    _logger.Error("QuestDeliver: item info not found for supply {ItemId} (quest {QuestId}).", supply.ItemId, questId);
-                    client.Send(new SystemMessagePacket($"Item information not found for item {supply.ItemId}."));
-                    return false;
+                    _logger.Error($"Item information not found for item {item.ItemId}.");
+                    client.Send(new SystemMessagePacket($"Item information not found for item {item.ItemId}."));
                 }
-
-                // Remove por pilhas
-                while (remain > 0)
+                else
                 {
-                    var stack = client.Tamer.Inventory.FindItemById(supply.ItemId);
-                    if (stack == null || stack.Amount <= 0)
-                    {
-                        client.Send(new SystemMessagePacket($"You don't have the quest supply {supply.ItemId} anymore."));
-                        return false;
-                    }
-
-                    int take = Math.Min(stack.Amount, remain);
-                    client.Tamer.Inventory.RemoveOrReduceItem(stack, take, stack.Slot);
-                    remain -= take;
+                    _logger.Verbose($"Character {client.TamerId} delivered quest {questId} supply item {questSupply.ItemId} x{questSupply.Amount}.");
+                    client.Tamer.Inventory.RemoveOrReduceItem(item, questSupply.Amount);
                 }
-
-                _logger.Verbose("Character {TamerId} returned quest {QuestId} supply item {ItemId} x{Amount}.",
-                    client.TamerId, questId, supply.ItemId, supply.Amount);
             }
-
-            return true;
         }
 
-        // ------------------------------------------------------------
-        // Recompensas
-        // ------------------------------------------------------------
-
-        private async Task GiveQuestRewards(GameClient client, QuestAssetModel questInfo)
+        private void QuestRewards(GameClient client, QuestAssetModel questInfo)
         {
-            foreach (var reward in questInfo.QuestRewards)
+            var questRewards = questInfo.QuestRewards;
+            foreach (var questReward in questRewards)
             {
-                switch (reward.RewardType)
+                switch (questReward.RewardType)
                 {
                     case QuestRewardTypeEnum.MoneyReward:
-                        GiveMoneyReward(client, reward);
+                        {
+                            QuestMoneyReward(client, questReward);
+                        }
                         break;
 
                     case QuestRewardTypeEnum.ExperienceReward:
-                        await GiveExpReward(client, reward);
+                        {
+                            QuestExpReward(client, questReward);
+                        }
                         break;
 
                     case QuestRewardTypeEnum.ItemReward:
-                        GiveItemReward(client, reward);
+                        {
+                            QuestItemReward(client, questReward);
+                        }
                         break;
                 }
             }
-
-            // Persistir bits do jogador caso tenha havido recompensa em dinheiro
-            await _sender.Send(new UpdateItemListBitsCommand(client.Tamer.Inventory.Id, client.Tamer.Inventory.Bits));
         }
 
-        private void GiveItemReward(GameClient client, QuestRewardAssetModel reward)
+        private void QuestItemReward(GameClient client, QuestRewardAssetModel questReward)
         {
-            foreach (var obj in reward.RewardObjectList)
+            questReward.RewardObjectList.ForEach(rewardObject =>
             {
-                var info = _assets.ItemInfo.FirstOrDefault(x => x.ItemId == obj.Reward);
-                if (info == null)
+                var newItem = new ItemModel();
+                newItem.SetItemInfo(_assets.ItemInfo.FirstOrDefault(x => x.ItemId == rewardObject.Reward));
+
+                if (newItem.ItemInfo == null)
                 {
-                    _logger.Warning("QuestDeliver: no item info for reward {ItemId}.", obj.Reward);
-                    client.Send(new SystemMessagePacket($"No item info found with ID {obj.Reward}."));
-                    continue;
+                    _logger.Warning($"No item info found with ID {rewardObject.Reward} for tamer {client.TamerId}.");
+                    client.Send(new SystemMessagePacket($"No item info found with ID {rewardObject.Reward}."));
+                    return;
                 }
 
-                var item = new ItemModel();
-                item.SetItemInfo(info);
-                item.SetItemId(obj.Reward);
-                item.SetAmount(obj.Amount);
+                newItem.SetItemId(rewardObject.Reward);
+                newItem.SetAmount(rewardObject.Amount);
 
-                if (item.IsTemporary)
-                    item.SetRemainingTime((uint)item.ItemInfo.UsageTimeMinutes);
+                if (newItem.IsTemporary)
+                    newItem.SetRemainingTime((uint)newItem.ItemInfo.UsageTimeMinutes);
 
-                var clone = (ItemModel)item.Clone();
-                if (!client.Tamer.Inventory.AddItem(clone))
+                var itemClone = (ItemModel)newItem.Clone();
+                if (!client.Tamer.Inventory.AddItem(itemClone))
                 {
                     client.Send(new PickItemFailPacket(PickItemFailReasonEnum.InventoryFull));
-                    continue;
                 }
-
-                _logger.Verbose("Character {TamerId} received quest {QuestId} item {ItemId} x{Amount} reward.",
-                    client.TamerId, reward.Quest.QuestId, obj.Reward, obj.Amount);
-            }
+                else
+                {
+                    _logger.Verbose($"Character {client.TamerId} received quest {questReward.Quest.QuestId} item {rewardObject.Reward} x{rewardObject.Amount} reward.");
+                }
+            });
         }
 
-        private async Task GiveExpReward(GameClient client, QuestRewardAssetModel reward)
+        private void QuestExpReward(GameClient client, QuestRewardAssetModel questReward)
         {
-            foreach (var obj in reward.RewardObjectList)
+            questReward.RewardObjectList.ForEach(async rewardObject =>
             {
-                _logger.Verbose("Character {TamerId} received quest {QuestId} EXP reward.", client.TamerId, reward.Quest.QuestId);
+                _logger.Verbose($"Character {client.TamerId} received quest {questReward.Quest.QuestId} exp reward.");
 
-                long tamerExp = obj.Amount / 10; // TODO: bônus
-                var tamerRes = ReceiveTamerExp(client.Tamer, tamerExp);
+                var tamerExpToReceive = rewardObject.Amount / 10; //TODO: +bonus
+                var tamerResult = ReceiveTamerExp(client.Tamer, tamerExpToReceive);
 
-                long partnerExp = obj.Amount;    // TODO: bônus
-                var partnerRes = ReceivePartnerExp(client.Partner, partnerExp);
+                var partnerExpToReceive = rewardObject.Amount; //TODO: +bonus
+                var partnerResult = ReceivePartnerExp(client.Partner, partnerExpToReceive);
 
-                client.Send(new ReceiveExpPacket(
-                    tamerExp,
-                    0,
-                    client.Tamer.CurrentExperience,
-                    client.Partner.GeneralHandler,
-                    partnerExp,
-                    0,
-                    client.Partner.CurrentExperience,
-                    client.Partner.CurrentEvolution.SkillExperience));
+                client.Send(
+                    new ReceiveExpPacket(
+                        tamerExpToReceive,
+                        0,//TODO: obter os bonus
+                        client.Tamer.CurrentExperience,
+                        client.Partner.GeneralHandler,
+                        partnerExpToReceive,
+                        0,//TODO: obter os bonus
+                        client.Partner.CurrentExperience,
+                        client.Partner.CurrentEvolution.SkillExperience
+                    )
+                );
 
-                if (tamerRes.LevelGain > 0 || partnerRes.LevelGain > 0)
+                if (tamerResult.LevelGain > 0 || partnerResult.LevelGain > 0)
                 {
                     client.Send(new UpdateStatusPacket(client.Tamer));
-                    _mapServer.BroadcastForTamerViewsAndSelf(client.TamerId, new UpdateMovementSpeedPacket(client.Tamer).Serialize());
+
+                    _mapServer.BroadcastForTamerViewsAndSelf(client.TamerId,
+                        new UpdateMovementSpeedPacket(client.Tamer).Serialize());
                 }
 
-                if (tamerRes.Success)
+                if (tamerResult.Success)
                 {
-                    await _sender.Send(new UpdateCharacterExperienceCommand(client.TamerId, client.Tamer.CurrentExperience, client.Tamer.Level));
+                    await _sender.Send(
+                        new UpdateCharacterExperienceCommand(
+                            client.TamerId,
+                            client.Tamer.CurrentExperience,
+                            client.Tamer.Level
+                        )
+                    );
                 }
 
-                if (partnerRes.Success)
+                if (partnerResult.Success)
                 {
-                    await _sender.Send(new UpdateDigimonExperienceCommand(client.Partner));
+                    await _sender.Send(
+                        new UpdateDigimonExperienceCommand(
+                            client.Partner
+                        )
+                    );
                 }
-            }
+            });
         }
 
-        private void GiveMoneyReward(GameClient client, QuestRewardAssetModel reward)
+        private void QuestMoneyReward(GameClient client, QuestRewardAssetModel questReward)
         {
-            foreach (var obj in reward.RewardObjectList)
+            questReward.RewardObjectList.ForEach(rewardObject =>
             {
-                client.Tamer.Inventory.AddBits(obj.Amount);
-                _logger.Verbose("Character {TamerId} received quest {QuestId} {Amount} bits reward.",
-                    client.TamerId, reward.Quest.QuestId, obj.Amount);
-            }
+                _logger.Verbose($"Character {client.TamerId} received quest {questReward.Quest.QuestId} {rewardObject.Amount} bits reward.");
+                client.Tamer.Inventory.AddBits(rewardObject.Amount);
+            });
         }
-
-        // ------------------------------------------------------------
-        // EXP helpers
-        // ------------------------------------------------------------
 
         private ReceiveExpResult ReceiveTamerExp(CharacterModel tamer, long tamerExpToReceive)
         {
-            var res = _expManager.ReceiveTamerExperience(tamerExpToReceive, tamer);
+            var tamerResult = _expManager.ReceiveTamerExperience(tamerExpToReceive, tamer);
 
-            if (res.LevelGain > 0)
+            if (tamerResult.LevelGain > 0)
             {
-                _mapServer.BroadcastForTamerViewsAndSelf(tamer.Id, new LevelUpPacket(tamer.GeneralHandler, tamer.Level).Serialize());
-                tamer.SetLevelStatus(_statusManager.GetTamerLevelStatus(tamer.Model, tamer.Level));
+                _mapServer.BroadcastForTamerViewsAndSelf(tamer.Id,
+                    new LevelUpPacket(tamer.GeneralHandler, tamer.Level).Serialize());
+
+                tamer.SetLevelStatus(
+                    _statusManager.GetTamerLevelStatus(
+                        tamer.Model,
+                        tamer.Level
+                    )
+                );
+
                 tamer.FullHeal();
             }
-
-            return res;
+            return tamerResult;
         }
 
         private ReceiveExpResult ReceivePartnerExp(DigimonModel partner, long partnerExpToReceive)
         {
-            var res = _expManager.ReceiveDigimonExperience(partnerExpToReceive, partner);
+            var partnerResult = _expManager.ReceiveDigimonExperience(partnerExpToReceive, partner);
 
-            if (res.LevelGain > 0)
+            if (partnerResult.LevelGain > 0)
             {
-                partner.SetBaseStatus(_statusManager.GetDigimonBaseStatus(partner.CurrentType, partner.Level, partner.Size));
-                _mapServer.BroadcastForTamerViewsAndSelf(partner.Character.Id, new LevelUpPacket(partner.GeneralHandler, partner.Level).Serialize());
+                partner.SetBaseStatus(
+                    _statusManager.GetDigimonBaseStatus(
+                        partner.CurrentType,
+                        partner.Level,
+                        partner.Size
+                    )
+                );
+
+                _mapServer.BroadcastForTamerViewsAndSelf(partner.Character.Id,
+                    new LevelUpPacket(partner.GeneralHandler, partner.Level).Serialize());
+
                 partner.FullHeal();
             }
 
-            return res;
+            return partnerResult;
         }
     }
 }
