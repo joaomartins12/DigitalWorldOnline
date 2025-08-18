@@ -14,6 +14,7 @@ namespace DigitalWorldOnline.Game.PacketProcessors
         private readonly ILogger _logger;
         private readonly ISender _sender;
 
+
         public QuestGiveUpPacketProcessor(
             ILogger logger,
             ISender sender)

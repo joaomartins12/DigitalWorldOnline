@@ -62,6 +62,7 @@ namespace DigitalWorldOnline.Game.PacketProcessors
                         return;
                     }
 
+
                     var itemClone = (ItemModel)item.Clone();
                     if (!client.Tamer.Inventory.AddItem(itemClone))
                     {

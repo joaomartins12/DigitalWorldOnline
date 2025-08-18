@@ -90,6 +90,7 @@ namespace DigitalWorldOnline.Game.PacketProcessors
                     }
             }
 
+
             _logger.Verbose($"Character {client.TamerId} updated quest {questId} goal {goalIndex}.");
 
             await _sender.Send(new UpdateCharacterInProgressCommand(questToUpdate));

@@ -1489,6 +1489,7 @@ namespace DigitalWorldOnline.Game.PacketProcessors
                 new LoadInventoryPacket(client.Tamer.Inventory, InventoryTypeEnum.Inventory).Serialize()
             ));
 
+
             _logger.Verbose("Tamer {Name} consumed 1 : {ItemName}", client.Tamer.Name, targetItem.ItemInfo.Name);
         }
     }

@@ -362,6 +362,7 @@ namespace DigitalWorldOnline.Game.PacketProcessors
             return tamerResult;
         }
 
+
         private ReceiveExpResult ReceivePartnerExp(DigimonModel partner, long partnerExpToReceive)
         {
             var partnerResult = _expManager.ReceiveDigimonExperience(partnerExpToReceive, partner);
